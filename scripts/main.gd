@@ -27,6 +27,10 @@ const EntityScript = preload("res://scripts/entity.gd")
 const MenuScript = preload("res://scripts/menu.gd")
 const HudScript = preload("res://scripts/hud.gd")
 const RelayPeer = preload("res://scripts/relay_peer.gd")
+const AudioScript = preload("res://scripts/audio.gd")
+
+const EXPLOSION_RADIUS := 4.0
+const BLAST_RADIUS := 9.0
 
 var menu: CanvasLayer
 var hud: CanvasLayer
@@ -67,6 +71,10 @@ var list_ws: WebSocketPeer
 var list_sent := false
 var auto_join := false
 var using_pad := false
+var test_mode := false   # headless test runs: no captured mouse, so don't auto-pause
+var audio: Node
+var water_boxes: Array = []   # [AABB, surface y]
+var fuses := {}               # host: explosive entity id -> seconds left
 
 # dodgeball (decided by the host, copied to everyone)
 var dodge_state := "waiting"   # waiting / build / playing / roundover
@@ -82,6 +90,8 @@ func _ready() -> void:
 	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_add_pad_ui_controls()
+	audio = AudioScript.new()
+	add_child(audio)
 	menu = MenuScript.new()
 	add_child(menu)
 	menu.host_requested.connect(host_game)
@@ -229,9 +239,23 @@ func _process(delta: float) -> void:
 			hud.set_dodge(dodge_state, dodge_timer, score, _alive_count("red"), _alive_count("blue"), teams.get(my_id(), ""))
 
 
+# Surface height of the water at this point, or NAN if it's not in water.
+func water_top(p: Vector3) -> float:
+	for w in water_boxes:
+		if (w[0] as AABB).has_point(p):
+			return w[1]
+	return NAN
+
+
 func _physics_process(delta: float) -> void:
 	if not in_game:
 		return
+	if multiplayer.is_server():
+		for id in fuses.keys():
+			fuses[id] -= delta
+			if fuses[id] <= 0.0:
+				fuses.erase(id)
+				_server_explode(id)
 	ent_send_timer += delta
 	if ent_send_timer < 1.0 / ENT_SEND_RATE:
 		return
@@ -280,6 +304,10 @@ func _start_world() -> void:
 		menu.queue_free()
 	world = Maps.build(map_id, plane_color)
 	add_child(world)
+	for w in get_tree().get_nodes_in_group("water"):
+		var size: Vector3 = ((w.get_child(0) as CollisionShape3D).shape as BoxShape3D).size
+		water_boxes.append([AABB(w.position - size * 0.5, size), w.get_meta("top")])
+	audio.start_music(map_id)
 	brick_root = Node3D.new()
 	brick_root.name = "Bricks"
 	add_child(brick_root)
@@ -480,6 +508,140 @@ func sync_tf(pos: Vector3, yaw: float, anim: int, vehicle: int) -> void:
 
 
 # ---------------- Physics props and vehicles ----------------
+
+# ---------------- Explosives ----------------
+
+# The owner saw it hit something hard (or it was wired / lit): tell the host to blow it up.
+func report_explode(id: int) -> void:
+	if multiplayer.is_server():
+		_server_explode(id)
+	else:
+		req_explode.rpc_id(1, id)
+
+
+@rpc("any_peer", "reliable")
+func req_explode(id: int) -> void:
+	if multiplayer.is_server():
+		_server_explode(id)
+
+
+func request_fuse(id: int) -> void:
+	if multiplayer.is_server():
+		_server_fuse(id)
+	else:
+		req_fuse.rpc_id(1, id)
+
+
+@rpc("any_peer", "reliable")
+func req_fuse(id: int) -> void:
+	if multiplayer.is_server():
+		_server_fuse(id)
+
+
+func _server_fuse(id: int) -> void:
+	var e = entities.get(id)
+	if e and Entities.TYPES[e.type].get("explosive", false) and not fuses.has(id):
+		fuses[id] = 3.0
+		fuse_lit.rpc(id)
+
+
+@rpc("authority", "call_local", "reliable")
+func fuse_lit(id: int) -> void:
+	var e = entities.get(id)
+	if e:
+		audio.play("fuse", e.global_position)
+		var spark := OmniLight3D.new()
+		spark.light_color = Color(1.0, 0.6, 0.2)
+		spark.light_energy = 2.0
+		spark.omni_range = 3.0
+		spark.position = Vector3(0, 0.5, 0)
+		e.add_child(spark)
+		var tw := spark.create_tween().set_loops(15)
+		tw.tween_property(spark, "light_energy", 0.3, 0.1)
+		tw.tween_property(spark, "light_energy", 2.0, 0.1)
+
+
+func _server_explode(id: int) -> void:
+	var e = entities.get(id)
+	if e == null:
+		return
+	var pos: Vector3 = e.global_position
+	delete_ent.rpc(id)
+	explode_at.rpc(pos)
+	# blow away nearby bricks
+	var box := AABB(pos - Vector3.ONE * EXPLOSION_RADIUS, Vector3.ONE * EXPLOSION_RADIUS * 2.0)
+	var hit := {}
+	for cell in _cells(box):
+		for bid in brick_cells.get(cell, []):
+			if (bricks[bid][0] as Vector3).distance_to(pos) < EXPLOSION_RADIUS:
+				hit[bid] = true
+	for bid in hit:
+		remove_brick.rpc(bid)
+	# chain reaction
+	for other in entities.values():
+		if Entities.TYPES[other.type].get("explosive", false) and other.global_position.distance_to(pos) < BLAST_RADIUS * 0.7 and not fuses.has(other.ent_id):
+			fuses[other.ent_id] = 0.15 + randf() * 0.2
+
+
+@rpc("authority", "call_local", "reliable")
+func explode_at(pos: Vector3) -> void:
+	audio.play("explosion", pos, 6.0)
+	_explosion_fx(pos)
+	# everyone shoves the things they're running
+	for e in entities.values():
+		if e.is_mine():
+			var d: Vector3 = e.global_position - pos
+			var dist := d.length()
+			if dist < BLAST_RADIUS:
+				var push := (1.0 - dist / BLAST_RADIUS)
+				e.sleeping = false
+				e.apply_central_impulse((d.normalized() + Vector3.UP * 0.6).normalized() * e.mass * 16.0 * push)
+				e.angular_velocity += Vector3(randf_range(-4, 4), randf_range(-4, 4), randf_range(-4, 4)) * push
+	var p := local_player()
+	if p and not p.vehicle:
+		var d: Vector3 = p.global_position + Vector3.UP - pos
+		if d.length() < BLAST_RADIUS:
+			var push := 1.0 - d.length() / BLAST_RADIUS
+			p.velocity += (d.normalized() + Vector3.UP * 0.8).normalized() * 18.0 * push
+
+
+func _explosion_fx(pos: Vector3) -> void:
+	var fx := Node3D.new()
+	fx.position = pos
+	add_child(fx)
+	var ball := Figure.sphere(fx, 1.0, Vector3.ZERO, Color(1.0, 0.55, 0.1))
+	var mat := Figure.glow_mat(Color(1.0, 0.55, 0.1)).duplicate() as StandardMaterial3D
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	ball.material_override = mat
+	ball.scale = Vector3.ONE * 0.5
+	var light := OmniLight3D.new()
+	light.light_color = Color(1.0, 0.6, 0.25)
+	light.light_energy = 8.0
+	light.omni_range = 18.0
+	fx.add_child(light)
+	var debris := CPUParticles3D.new()
+	debris.one_shot = true
+	debris.amount = 40
+	debris.lifetime = 1.2
+	debris.explosiveness = 1.0
+	debris.direction = Vector3.UP
+	debris.spread = 180.0
+	debris.initial_velocity_min = 6.0
+	debris.initial_velocity_max = 14.0
+	debris.gravity = Vector3(0, -18, 0)
+	var cube := BoxMesh.new()
+	cube.size = Vector3.ONE * 0.18
+	debris.mesh = cube
+	debris.material_override = Figure.mat(Color(0.25, 0.22, 0.2))
+	debris.emitting = true
+	fx.add_child(debris)
+	var tw := fx.create_tween().set_parallel(true)
+	tw.tween_property(ball, "scale", Vector3.ONE * 4.5, 0.35).set_ease(Tween.EASE_OUT)
+	tw.tween_property(mat, "albedo_color:a", 0.0, 0.5).set_delay(0.15)
+	tw.tween_property(light, "light_energy", 0.0, 0.6)
+	tw.chain().tween_interval(0.8)
+	tw.chain().tween_callback(fx.queue_free)
+
 
 func entity_respawn_point() -> Vector3:
 	return Maps.spawn_point(map_id) + Vector3(randf_range(-3, 3), 3, randf_range(-3, 3))
@@ -732,6 +894,10 @@ func dodge_update(state: String, timer: float, new_score: Dictionary, alive_ids:
 		alive[a] = true
 	if hud and msg != "":
 		hud.big_message(msg)
+		if state == "roundover":
+			audio.play("win")
+		elif state == "playing" and was != "playing":
+			audio.play("beep", null, 0.0, 1.5)
 	var p := local_player()
 	if p == null:
 		return
@@ -941,6 +1107,7 @@ func _server_place(peer: int, pos: Vector3, size: Vector3i, color: Color, shape:
 @rpc("authority", "call_local", "reliable")
 func place_brick(id: int, pos: Vector3, size: Vector3i, color: Color, shape: int, rot: int) -> void:
 	_add_brick(id, pos, size, color, shape, rot)
+	audio.play("place", pos, -4.0, randf_range(0.9, 1.1))
 
 
 func request_remove(id: int) -> void:
@@ -974,6 +1141,7 @@ func remove_brick(id: int) -> void:
 	if not bricks.has(id):
 		return
 	var b: Array = bricks[id]
+	audio.play("remove", b[0], -4.0, randf_range(0.9, 1.1))
 	for cell in _cells(Bricks.box_of(b[0], b[1], b[4])):
 		if brick_cells.has(cell):
 			brick_cells[cell].erase(id)
@@ -1036,6 +1204,7 @@ func paint_brick(id: int, color: Color) -> void:
 	if not bricks.has(id):
 		return
 	bricks[id][2] = color
+	audio.play("paint", bricks[id][0], -6.0)
 	if brick_nodes.has(id):
 		brick_nodes[id].queue_free()
 		brick_nodes.erase(id)
@@ -1068,6 +1237,7 @@ func set_door(id: int, open: bool) -> void:
 		doors_open.erase(id)
 	if brick_nodes.has(id):
 		Bricks.set_door_open(brick_nodes[id], open)
+		audio.play("door", bricks[id][0])
 
 
 func _clear_all_bricks() -> void:
@@ -1265,6 +1435,7 @@ func system_msg(text: String) -> void:
 # ---------------- Test hooks (command line: godot -- autohost=2 autoquit=5) ----------------
 
 func _handle_test_args() -> void:
+	test_mode = not OS.get_cmdline_user_args().is_empty()
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("autohost="):
 			host_game({"name": "Host"}, int(a.get_slice("=", 1)), Color(0.3, 0.6, 0.9))
@@ -1289,6 +1460,8 @@ func _handle_test_args() -> void:
 			get_tree().create_timer(2.0).timeout.connect(func():
 				for t in Entities.TYPES.size():
 					request_spawn(t, Vector3(-30 + (t % 7) * 8.0, 2.0, -15.0 - (t / 7) * 10.0), 0.0))
+		elif a == "autopadmode":
+			using_pad = true
 		elif a.begins_with("autodrive="):
 			# drive the vehicle of this type forward for a few seconds (W held)
 			var vt := int(a.get_slice("=", 1))
@@ -1354,6 +1527,37 @@ func _handle_test_args() -> void:
 						await get_tree().create_timer(2.0).timeout
 						print("TEST pad car moved ", snappedf(e.position.distance_to(car_start), 0.1), " m, driving=", p.vehicle != null)
 						break)
+		elif a == "autoboom":
+			get_tree().create_timer(4.0).timeout.connect(func():
+				for e in entities.values():
+					if e.type == 19:
+						print("TEST lighting TNT, ents=", entities.size())
+						request_fuse(e.ent_id)
+						break
+				await get_tree().create_timer(4.0).timeout
+				print("TEST after boom ents=", entities.size()))
+		elif a == "autoswim":
+			get_tree().create_timer(3.0).timeout.connect(func():
+				var p := local_player()
+				p.position = Vector3(16, 1.0, -14)
+				await get_tree().create_timer(2.5).timeout
+				print("TEST swimming=", p.swimming, " y=", snappedf(p.position.y, 0.01), " water top=", water_top(p.position + Vector3.UP * 1.1)))
+		elif a == "autoboat":
+			get_tree().create_timer(2.5).timeout.connect(func():
+				using_pad = true
+				request_spawn(21, Vector3(0, 0.5, 130), PI)
+				await get_tree().create_timer(2.0).timeout
+				for e in entities.values():
+					if e.type == 21:
+						print("TEST boat floating at y=", snappedf(e.position.y, 0.01))
+						request_drive(e.ent_id, true)
+						var ev := InputEventKey.new()
+						ev.physical_keycode = KEY_W
+						ev.pressed = true
+						Input.parse_input_event(ev)
+						var start: Vector3 = e.position
+						await get_tree().create_timer(4.0).timeout
+						print("TEST boat moved ", snappedf(e.position.distance_to(start), 0.1), " y=", snappedf(e.position.y, 0.01), " up=", e.global_basis.y.snapped(Vector3.ONE * 0.01)))
 		elif a == "autoteam":
 			get_tree().create_timer(2.5).timeout.connect(func(): request_team("red" if multiplayer.is_server() else "blue"))
 		elif a.begins_with("autosave="):

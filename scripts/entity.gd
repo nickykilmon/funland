@@ -28,6 +28,9 @@ var wheel_nodes: Array[Node3D] = []
 var rotor_speed := 0.0
 var throttle := 0.0
 var grounded := 0
+var last_speed := 0.0
+var exploded := false
+var engine: AudioStreamPlayer3D
 
 
 func _ready() -> void:
@@ -43,6 +46,11 @@ func _ready() -> void:
 		center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
 		center_of_mass = Vector3(0, cfg.get("com_y", 0.0), 0)
 		angular_damp = 0.5
+		engine = AudioStreamPlayer3D.new()
+		engine.stream = main.audio.engine_stream
+		engine.unit_size = 6.0
+		engine.volume_db = -8.0
+		add_child(engine)
 	else:
 		contact_monitor = true
 		max_contacts_reported = 4
@@ -99,8 +107,11 @@ func state_to_send() -> Array:
 
 func _physics_process(delta: float) -> void:
 	if is_mine():
+		if not sleeping:
+			_float(delta)
 		if cfg["kind"] != Entities.ITEM:
 			_vehicle(delta)
+		last_speed = linear_velocity.length()
 		if position.y < -40.0:
 			position = main.entity_respawn_point()
 			linear_velocity = Vector3.ZERO
@@ -114,11 +125,19 @@ func _physics_process(delta: float) -> void:
 
 
 func _on_body_entered(body: Node) -> void:
-	if live_team == "" or not is_mine():
+	if not is_mine():
+		return
+	# explosives go off when they hit something hard
+	if cfg.get("explosive", false) and last_speed > 9.0 and not exploded:
+		exploded = true
+		main.report_explode(ent_id)
+		return
+	if live_team == "":
 		return
 	if body is CharacterBody3D and "peer_id" in body:
 		if body.peer_id == main.multiplayer.get_unique_id():
 			return
+		main.audio.play("hit", global_position)
 		main.report_ball_hit(ent_id, body.peer_id, live_team)
 	elif body.has_meta("brick_id"):
 		main.report_brick_hit(body.get_meta("brick_id"))
@@ -147,8 +166,8 @@ func _vehicle(delta: float) -> void:
 		stick_y = -_stick(JOY_AXIS_LEFT_Y)
 		rt = Input.get_joy_axis(0, JOY_AXIS_TRIGGER_RIGHT)
 		lt = Input.get_joy_axis(0, JOY_AXIS_TRIGGER_LEFT)
-	# park: let a vehicle nobody is driving fall asleep once it has settled
-	if not driving:
+	# park: let a vehicle nobody is driving fall asleep once it has settled (but keep boats bobbing)
+	if not driving and not (cfg["kind"] == Entities.BOAT and not is_nan(main.water_top(global_position))):
 		if linear_velocity.length() < 0.08 and angular_velocity.length() < 0.08:
 			still_time += delta
 		else:
@@ -168,6 +187,8 @@ func _vehicle(delta: float) -> void:
 			# controller: left stick fly/turn, right trigger up, left trigger down
 			grounded = _suspension(delta, 0.0, 0.0, true, 6.0, false)
 			_heli(delta, driving, clampf(w + stick_y, -1.0, 1.0), s, (1.0 if space_key else 0.0) - (1.0 if shift else 0.0) + rt - lt)
+		Entities.BOAT:
+			_boat(driving, clampf(w + rt - lt + stick_y, -1.0, 1.0), s)
 		Entities.PLANE:
 			# controller: left stick pitch/roll (push forward = nose down), triggers throttle
 			grounded = _suspension(delta, 0.0, s, not driving or (w < 0 and throttle == 0.0), 6.0, false)
@@ -274,6 +295,42 @@ static func _stick(axis: JoyAxis) -> float:
 	return 0.0 if absf(v) < 0.2 else v
 
 
+# Floating: anything in water gets pushed up and slowed down. Boats float flat and steady.
+func _float(delta: float) -> void:
+	var top: float = main.water_top(global_position)
+	if is_nan(top):
+		return
+	var depth := clampf(top - global_position.y + 0.3, 0.0, 1.0)
+	var g := 9.8 * gravity_scale
+	var lift := 1.6 if cfg["kind"] == Entities.ITEM else 1.3
+	if cfg["kind"] == Entities.BOAT:
+		lift = 2.2
+	apply_central_force(Vector3.UP * mass * g * lift * depth)
+	apply_central_force(-linear_velocity * mass * 1.2 * depth)
+	angular_velocity *= 1.0 - minf(delta * 2.0 * depth, 0.5)
+	if cfg["kind"] == Entities.BOAT and depth > 0.0:
+		var yaw := global_basis.get_euler().y
+		var q := Quaternion(Vector3.UP, yaw) * global_basis.get_rotation_quaternion().inverse()
+		if q.w < 0.0:
+			q = -q
+		angular_velocity += Vector3(q.x, 0.0, q.z) * 2.0 * 4.0 * delta * 10.0
+
+
+func _boat(driving: bool, thrust: float, turn: float) -> void:
+	if not driving or is_nan(main.water_top(global_position)):
+		return
+	var fwd := -global_basis.z
+	fwd.y = 0.0
+	fwd = fwd.normalized()
+	var speed := linear_velocity.dot(fwd)
+	if (thrust > 0.0 and speed < 18.0) or (thrust < 0.0 and speed > -6.0):
+		apply_central_force(fwd * thrust * mass * 9.0)
+	var side := linear_velocity - fwd * speed
+	side.y = 0.0
+	apply_central_force(-side * mass * 1.5)
+	angular_velocity.y = lerpf(angular_velocity.y, turn * 1.3 * clampf(absf(speed) / 4.0, 0.3, 1.0) * signf(speed + 0.01), 0.15)
+
+
 func flip_upright() -> void:
 	var yaw := global_basis.get_euler().y
 	quaternion = Quaternion(Vector3.UP, yaw)
@@ -285,6 +342,14 @@ func flip_upright() -> void:
 func _animate(delta: float) -> void:
 	if cfg["kind"] == Entities.ITEM:
 		return
+	var running := driver_id != 0 or rotor_speed > 0.05
+	if running and not engine.playing:
+		engine.play()
+	elif not running and engine.playing:
+		engine.stop()
+	if running:
+		var spd := linear_velocity.length() if is_mine() else net_vel.length()
+		engine.pitch_scale = 0.6 + spd / 25.0 + rotor_speed * 0.4
 	var rotor := get_node_or_null("Rotor") as Node3D
 	if rotor:
 		rotor.rotate_y(rotor_speed * delta * 28.0)

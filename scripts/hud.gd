@@ -12,7 +12,7 @@ const Bricks = preload("res://scripts/bricks.gd")
 const Entities = preload("res://scripts/entities.gd")
 
 const HELP := """WASD move · Space jump · Shift run · V camera · T chat · Tab players
-B spawn menu · Click grab/drop · Right click throw · X delete · F drive / door
+B spawn menu · Click grab/drop · Right click throw · X delete · F drive / door / light TNT · M music
 E funbrick tool · G wave · H dance · C sit"""
 const DODGE_HELP := """WASD move · Space jump · Shift run · V camera · T chat · Tab players
 Click grab a ball · Right click throw · E build defenses (build phase)"""
@@ -49,6 +49,7 @@ var budget := -1
 var dodgeball := false
 var last_tool := []
 var pause_open := false
+var water_tint: ColorRect
 var resume_btn: Button
 var spawn_first: Button
 var team_first: Button
@@ -107,6 +108,13 @@ func _ready() -> void:
 	chat_edit.gui_input.connect(_on_chat_input)
 	chat_box.add_child(chat_edit)
 
+	water_tint = ColorRect.new()
+	water_tint.color = Color(0.1, 0.35, 0.6, 0.45)
+	water_tint.set_anchors_preset(Control.PRESET_FULL_RECT)
+	water_tint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	water_tint.visible = false
+	add_child(water_tint)
+	move_child(water_tint, 0)
 	_build_tool_panel()
 	_build_pause_panel()
 	_build_spawn_menu()
@@ -197,6 +205,10 @@ func _build_pause_panel() -> void:
 	clear_btn.text = "Clear all bricks"
 	clear_btn.pressed.connect(func(): clear_pressed.emit())
 	vb.add_child(clear_btn)
+	var music := Button.new()
+	music.text = "Music on/off (M)"
+	music.pressed.connect(func(): get_parent().audio.toggle_music())
+	vb.add_child(music)
 	var leave := Button.new()
 	leave.text = "Leave game"
 	leave.pressed.connect(func(): leave_pressed.emit())
@@ -220,7 +232,7 @@ func _process(delta: float) -> void:
 	if team_panel.visible or spawn_panel.visible:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	var pad: bool = get_parent().using_pad
-	var paused := (pause_open or (Input.mouse_mode != Input.MOUSE_MODE_CAPTURED and not pad)) and not is_typing() and not team_panel.visible and not spawn_panel.visible
+	var paused: bool = (pause_open or (Input.mouse_mode != Input.MOUSE_MODE_CAPTURED and not pad and not get_parent().test_mode)) and not is_typing() and not team_panel.visible and not spawn_panel.visible
 	if team_panel.visible and pad and get_viewport().gui_get_focus_owner() == null:
 		team_first.grab_focus()
 	if paused and pad and get_viewport().gui_get_focus_owner() == null:
@@ -349,6 +361,7 @@ func _build_spawn_menu() -> void:
 			if spawn_first == null:
 				spawn_first = b
 			b.pressed.connect(func():
+				get_parent().audio.play("click")
 				spawn_panel.visible = false
 				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 				spawn_chosen.emit(type))
@@ -501,6 +514,10 @@ func set_dodge(state: String, timer: float, score: Dictionary, red_alive: int, b
 	if my_team != "":
 		line += "\nYou're on %s" % my_team.to_upper()
 	dodge_label.text = line
+
+
+func set_underwater(on: bool) -> void:
+	water_tint.visible = on
 
 
 func set_budget(left: int) -> void:

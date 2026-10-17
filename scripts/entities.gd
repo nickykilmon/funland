@@ -4,7 +4,7 @@ extends RefCounted
 
 const Figure = preload("res://scripts/figure.gd")
 
-enum { ITEM, CAR, HELI, PLANE }
+enum { ITEM, CAR, HELI, PLANE, BOAT }
 
 const DODGEBALL_TYPE := 4
 
@@ -40,6 +40,9 @@ const TYPES := [
 	{"name": "Plane", "kind": PLANE, "mass": 1000.0, "wheel_r": 0.3, "rest": 0.5, "steer": 0.4,
 		"wheels": [Vector3(0, 0.6, -2.4), Vector3(-1.2, 0.6, 0.5), Vector3(1.2, 0.6, 0.5)],
 		"seat": Vector3(0, 0.75, -0.6), "cam": 12.0, "com_y": 0.9},
+	{"name": "TNT", "kind": ITEM, "mass": 10.0, "explosive": true},
+	{"name": "Explosive Barrel", "kind": ITEM, "mass": 20.0, "explosive": true},
+	{"name": "Boat", "kind": BOAT, "mass": 500.0, "seat": Vector3(0, 0.35, 1.0), "cam": 8.0, "com_y": -0.3},
 ]
 
 
@@ -181,7 +184,44 @@ static func dress(body: RigidBody3D, type: int) -> void:
 		16: _monster(body, t)
 		17: _heli(body, t)
 		18: _plane(body, t)
-	if is_vehicle(type):
+		19:
+			var red := Color(0.85, 0.1, 0.08)
+			Figure.box(body, Vector3(0.7, 0.6, 0.6), Vector3.ZERO, red)
+			Figure.box(body, Vector3(0.72, 0.15, 0.62), Vector3.ZERO, Color(0.95, 0.9, 0.8))
+			for z in [-0.311, 0.311]:
+				var l := Label3D.new()
+				l.text = "TNT"
+				l.font_size = 64
+				l.pixel_size = 0.004
+				l.outline_size = 0
+				l.modulate = Color.BLACK
+				l.position = Vector3(0, 0, z)
+				l.rotation.y = 0.0 if z > 0 else PI
+				body.add_child(l)
+			Figure.cyl(body, 0.015, 0.2, Vector3(0, 0.4, 0), Color(0.3, 0.3, 0.3))
+			_box_shape(body, Vector3(0.7, 0.6, 0.6))
+		20:
+			Figure.cyl(body, 0.4, 1.0, Vector3.ZERO, Color(0.85, 0.12, 0.1))
+			for y in [-0.3, 0.3]:
+				Figure.cyl(body, 0.42, 0.08, Vector3(0, y, 0), Color(1.0, 0.8, 0.1))
+			_cyl_shape(body, 0.4, 1.0)
+		21:
+			var hull := Color(0.95, 0.95, 0.97)
+			Figure.box(body, Vector3(2.0, 0.5, 3.6), Vector3(0, 0.25, 0.3), hull)
+			Figure.box(body, Vector3(2.02, 0.12, 3.62), Vector3(0, 0.1, 0.3), Color(0.15, 0.35, 0.75))
+			var bow := MeshInstance3D.new()
+			var pm := PrismMesh.new()
+			pm.size = Vector3(2.0, 1.2, 0.5)
+			bow.mesh = pm
+			bow.material_override = Figure.mat(hull)
+			bow.rotation = Vector3(PI * 0.5, 0, 0)
+			bow.position = Vector3(0, 0.25, -2.05)
+			body.add_child(bow)
+			Figure.box(body, Vector3(1.6, 0.1, 1.0), Vector3(0, 0.55, 1.2), Color(0.55, 0.38, 0.2))
+			Figure.box(body, Vector3(0.4, 0.6, 0.4), Vector3(0, 0.55, 2.2), Color(0.2, 0.2, 0.22))
+			_glass(body, Vector3(1.6, 0.45, 0.05), Vector3(0, 0.75, -0.3), -0.3)
+			_box_shape(body, Vector3(2.0, 0.5, 4.4), Vector3(0, 0.25, 0.0))
+	if is_vehicle(type) and t.has("wheels"):
 		_wheels(body, t)
 
 

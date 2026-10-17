@@ -70,6 +70,10 @@ var pad_sprint := false
 var rt_was := false
 var lt_was := false
 
+# swimming
+var swimming := false
+var underwater := false
+
 
 func _ready() -> void:
 	floor_max_angle = deg_to_rad(50)
@@ -162,6 +166,7 @@ func respawn() -> void:
 
 func knocked_out() -> void:
 	respawn()
+	main.audio.play("out")
 	if main.hud:
 		main.hud.big_message("You're out! Watch from the bench until the next round.")
 
@@ -189,7 +194,17 @@ func _physics_process(delta: float) -> void:
 
 
 func _local_physics(delta: float) -> void:
-	if not is_on_floor():
+	var top: float = main.water_top(position + Vector3.UP * 1.1)
+	var was_swimming := swimming
+	swimming = not is_nan(top)
+	if swimming and not was_swimming and velocity.y < -3.0:
+		main.audio.play("splash", position)
+	underwater = not is_nan(main.water_top(cam.global_position))
+	main.hud.set_underwater(underwater)
+	if swimming:
+		# tread water with your head above the surface
+		velocity.y = move_toward(velocity.y, clampf((top - 1.45 - position.y) * 3.0, -2.5, 2.5), 10.0 * delta)
+	elif not is_on_floor():
 		velocity.y -= gravity * delta
 	var typing: bool = main.hud != null and main.hud.is_typing()
 	var input := Vector2.ZERO
@@ -202,15 +217,25 @@ func _local_physics(delta: float) -> void:
 		if Input.is_physical_key_pressed(KEY_D): input.x += 1
 		input += Vector2(stick(JOY_AXIS_LEFT_X), stick(JOY_AXIS_LEFT_Y))
 		input = input.limit_length(1.0)
-		if (Input.is_physical_key_pressed(KEY_SPACE) or Input.is_joy_button_pressed(0, JOY_BUTTON_A)) and is_on_floor():
+		var jump_key := Input.is_physical_key_pressed(KEY_SPACE) or Input.is_joy_button_pressed(0, JOY_BUTTON_A)
+		if swimming:
+			if jump_key:
+				# swim up; near the surface, hop out
+				velocity.y = JUMP_SPEED * 0.85 if position.y + 1.5 > top else 3.5
+			elif Input.is_physical_key_pressed(KEY_CTRL) or Input.is_joy_button_pressed(0, JOY_BUTTON_B):
+				velocity.y = -3.0
+		elif jump_key and is_on_floor():
 			velocity.y = JUMP_SPEED
 			jumped = true
+			main.audio.play("jump", null, -10.0)
 	if input.length() < 0.1:
 		pad_sprint = false
 	if (input != Vector2.ZERO or jumped) and anim != ANIM_WAVE:
 		anim = ANIM_NONE
 	var running := not menus and (Input.is_physical_key_pressed(KEY_SHIFT) or pad_sprint)
 	var speed := RUN_SPEED if running else WALK_SPEED
+	if swimming:
+		speed *= 0.6
 	var dir := transform.basis * Vector3(input.x, 0, input.y)
 	var accel := 50.0 if is_on_floor() else 15.0
 	velocity.x = move_toward(velocity.x, dir.x * speed, accel * delta)
@@ -366,6 +391,8 @@ func _key(ke: InputEventKey) -> void:
 			_set_view(not third_person)
 		KEY_F:
 			_use()
+		KEY_M:
+			main.audio.toggle_music()
 	if vehicle:
 		if key == KEY_R and vehicle.is_mine():
 			vehicle.flip_upright()
@@ -545,6 +572,10 @@ func _use() -> void:
 	if id >= 0 and main.bricks.has(id) and main.bricks[id][3] == Bricks.DOOR:
 		main.request_door(id)
 		return
+	var looked := _look_entity()
+	if looked and Entities.TYPES[looked.type].get("explosive", false):
+		main.request_fuse(looked.ent_id)
+		return
 	var best: RigidBody3D = null
 	var best_d := 4.5
 	for e in main.entities.values():
@@ -653,6 +684,7 @@ func on_owner_changed(e: RigidBody3D) -> void:
 
 
 func _start_hold(e: RigidBody3D) -> void:
+	main.audio.play("grab", null, -8.0)
 	held = e
 	hold_dist = 1.4 if main.is_dodgeball() else clampf(cam.global_position.distance_to(e.global_position), 1.6, 8.0)
 
@@ -677,6 +709,7 @@ func _drop() -> void:
 func _throw() -> void:
 	if held == null or not is_instance_valid(held):
 		return
+	main.audio.play("throw", null, -6.0)
 	var speed := clampf(60.0 / sqrt(held.mass), 6.0, 30.0)
 	held.linear_velocity = -cam.global_basis.z * speed + velocity * 0.5
 	if main.is_dodgeball():

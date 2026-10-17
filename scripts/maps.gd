@@ -46,7 +46,7 @@ static func build(id: int, ground: Color) -> Node3D:
 	match id:
 		0:
 			_env(root)
-			_ground(root, ground, 160.0)
+			_ground(root, ground, 500.0)
 		1: _house_map(root, ground)
 		2: _city(root)
 		3: _forest(root)
@@ -99,7 +99,12 @@ static func _env(root: Node3D, top := Color(0.22, 0.48, 0.95), horizon := Color(
 
 
 # Baseplate-style material: tiles a little stud ring every 0.4 m so it lines up with funbricks.
+static var _stud_mats := {}
+
+
 static func stud_mat(c: Color) -> StandardMaterial3D:
+	if _stud_mats.has(c.to_html()):
+		return _stud_mats[c.to_html()]
 	if _stud_tex == null:
 		var img := Image.create(64, 64, false, Image.FORMAT_RGB8)
 		for y in 64:
@@ -120,6 +125,7 @@ static func stud_mat(c: Color) -> StandardMaterial3D:
 	m.uv1_world_triplanar = true
 	m.uv1_scale = Vector3(2.5, 2.5, 2.5)
 	m.roughness = 0.45
+	_stud_mats[c.to_html()] = m
 	return m
 
 
@@ -213,6 +219,45 @@ static func _water(root: Node3D, size: Vector2, pos: Vector3, c := Color(0.1, 0.
 	root.add_child(water)
 
 
+# Water you can swim in: players and props inside this box float/swim.
+static func water_zone(root: Node3D, size: Vector3, pos: Vector3) -> void:
+	var area := Area3D.new()
+	area.position = pos
+	area.collision_layer = 0
+	area.collision_mask = 2 | 16
+	area.add_to_group("water")
+	area.set_meta("top", pos.y + size.y * 0.5)
+	var cs := CollisionShape3D.new()
+	var bs := BoxShape3D.new()
+	bs.size = size
+	cs.shape = bs
+	area.add_child(cs)
+	root.add_child(area)
+
+
+# An above-ground pool: rim walls you can hop over, a floor, and water filling it to `depth`.
+static func pool(root: Node3D, c: Vector3, size: Vector2, depth: float, rim: Color, water: Color) -> void:
+	var wall_h := depth + 0.1
+	var t := 0.4
+	solid(root, Vector3(size.x + t * 2, wall_h, t), c + Vector3(0, wall_h * 0.5, -size.y * 0.5 - t * 0.5), rim)
+	solid(root, Vector3(size.x + t * 2, wall_h, t), c + Vector3(0, wall_h * 0.5, size.y * 0.5 + t * 0.5), rim)
+	solid(root, Vector3(t, wall_h, size.y), c + Vector3(-size.x * 0.5 - t * 0.5, wall_h * 0.5, 0), rim)
+	solid(root, Vector3(t, wall_h, size.y), c + Vector3(size.x * 0.5 + t * 0.5, wall_h * 0.5, 0), rim)
+	# steps up the outside so you can climb in
+	for i in int(ceil(wall_h / 0.45)):
+		solid(root, Vector3(2.0, 0.45 * (i + 1), 0.6), c + Vector3(0, 0.225 * (i + 1), size.y * 0.5 + t + 0.3 + (ceil(wall_h / 0.45) - 1 - i) * 0.6), rim.darkened(0.1))
+	_water(root, size, c + Vector3(0, depth - 0.05, 0), water)
+	water_zone(root, Vector3(size.x, depth, size.y), c + Vector3(0, depth * 0.5, 0))
+
+
+static func _snowman_row(root: Node3D, p: Vector3) -> void:
+	var snow := Color(0.95, 0.97, 1.0)
+	ball(root, 0.9, p + Vector3(0, 0.8, 0), snow)
+	ball(root, 0.65, p + Vector3(0, 2.1, 0), snow)
+	ball(root, 0.45, p + Vector3(0, 3.05, 0), snow)
+	Figure.cyl(root, 0.0, 0.4, p + Vector3(0, 3.05, -0.6), Color(1.0, 0.5, 0.1), 0.07).rotation.x = -PI * 0.5
+
+
 static func _ground(root: Node3D, c: Color, size: float) -> void:
 	solid(root, Vector3(size, 1, size), Vector3(0, -0.5, 0), c, stud_mat(c))
 
@@ -247,24 +292,56 @@ static func _palm(root: Node3D, p: Vector3, yaw: float) -> void:
 
 static func _house_map(root: Node3D, ground: Color) -> void:
 	_env(root)
-	_ground(root, ground, 120.0)
-	var wall := Color(0.95, 0.9, 0.8)
-	var roof := Color(0.75, 0.15, 0.12)
+	_ground(root, ground, 400.0)
+	_house(root, Vector3(0, 0, -12), Color(0.95, 0.9, 0.8), Color(0.75, 0.15, 0.12), 0.0)
+	solid(root, Vector3(2.0, 0.1, 1.2), Vector3(0, 0.85, -13), Color(0.5, 0.3, 0.15))
+	for lx in [-0.9, 0.9]:
+		for lz in [-0.5, 0.5]:
+			solid(root, Vector3(0.1, 0.8, 0.1), Vector3(lx, 0.4, -13 + lz), Color(0.5, 0.3, 0.15))
+	Figure.box(root, Vector3(1.6, 0.02, 6), Vector3(0, 0.01, -5), Color(0.75, 0.72, 0.68))
+	# backyard pool with a diving board
+	pool(root, Vector3(16, 0, -14), Vector2(10, 7), 2.4, Color(0.92, 0.92, 0.95), Color(0.2, 0.6, 0.95, 0.65))
+	solid(root, Vector3(0.6, 0.1, 3.0), Vector3(16, 1.3, -18.4), Color(0.2, 0.5, 0.9))
+	solid(root, Vector3(0.6, 1.2, 0.6), Vector3(16, 0.6, -19.6), Color(0.8, 0.8, 0.8))
+	# street of neighbours
+	Figure.box(root, Vector3(240, 0.02, 8), Vector3(0, 0.012, 14), Color(0.25, 0.25, 0.27))
+	var wall_colors := [Color(0.95, 0.85, 0.7), Color(0.75, 0.85, 0.95), Color(0.85, 0.95, 0.8), Color(1.0, 0.9, 0.9), Color(0.9, 0.9, 0.9)]
+	var roof_colors := [Color(0.3, 0.3, 0.35), Color(0.55, 0.25, 0.15), Color(0.2, 0.35, 0.55)]
+	for i in 12:
+		var x := -110.0 + i * 20.0
+		if absf(x) < 12.0:
+			continue
+		_house(root, Vector3(x, 0, -12), wall_colors[i % wall_colors.size()], roof_colors[i % roof_colors.size()], 0.0)
+		_house(root, Vector3(x, 0, 40), wall_colors[(i + 2) % wall_colors.size()], roof_colors[(i + 1) % roof_colors.size()], 0.0, true)
+	# a park with a playground
+	var park := Vector3(0, 0, 80)
+	Figure.box(root, Vector3(50, 0.02, 30), park + Vector3(0, 0.012, 0), Color(0.3, 0.62, 0.25))
+	solid(root, Vector3(0.2, 3.0, 0.2), park + Vector3(-6, 1.5, 0), Color(0.8, 0.2, 0.2))
+	solid(root, Vector3(0.2, 3.0, 0.2), park + Vector3(-2, 1.5, 0), Color(0.8, 0.2, 0.2))
+	solid(root, Vector3(4.2, 0.2, 0.2), park + Vector3(-4, 3.0, 0), Color(0.8, 0.2, 0.2))
+	solid(root, Vector3(2, 2, 2), park + Vector3(6, 1.0, 0), Color(0.2, 0.5, 0.9))
+	ramp(root, park + Vector3(6, 0, 7), park + Vector3(6, 2.0, 1), 1.2, Color(1.0, 0.8, 0.1))
+	for i in 16:
+		_tree(root, park + Vector3(-22 + (i % 8) * 6.3, 0, -12 + (i / 8) * 24), 3.0, i % 3 == 0)
+
+
+# A little house: walls with a doorway and windows, a pitched roof and a chimney. Faces +z (or -z if flipped).
+static func _house(root: Node3D, c: Vector3, wall: Color, roof: Color, _unused: float, flipped := false) -> void:
 	var glass := Color(0.45, 0.7, 0.95)
-	var z0 := -12.0
-	solid(root, Vector3(10, 0.04, 8), Vector3(0, 0.02, z0), Color(0.6, 0.38, 0.2))
-	solid(root, Vector3(4.2, 3.5, 0.4), Vector3(-2.9, 1.75, z0 + 4), wall)
-	solid(root, Vector3(4.2, 3.5, 0.4), Vector3(2.9, 1.75, z0 + 4), wall)
-	solid(root, Vector3(1.6, 1.1, 0.4), Vector3(0, 2.95, z0 + 4), wall)
-	solid(root, Vector3(10, 3.5, 0.4), Vector3(0, 1.75, z0 - 4), wall)
-	solid(root, Vector3(0.4, 3.5, 7.6), Vector3(-4.8, 1.75, z0), wall)
-	solid(root, Vector3(0.4, 3.5, 7.6), Vector3(4.8, 1.75, z0), wall)
+	var f := -1.0 if flipped else 1.0
+	solid(root, Vector3(10, 0.04, 8), c + Vector3(0, 0.02, 0), Color(0.6, 0.38, 0.2))
+	solid(root, Vector3(4.2, 3.5, 0.4), c + Vector3(-2.9, 1.75, 4 * f), wall)
+	solid(root, Vector3(4.2, 3.5, 0.4), c + Vector3(2.9, 1.75, 4 * f), wall)
+	solid(root, Vector3(1.6, 1.1, 0.4), c + Vector3(0, 2.95, 4 * f), wall)
+	solid(root, Vector3(10, 3.5, 0.4), c + Vector3(0, 1.75, -4 * f), wall)
+	solid(root, Vector3(0.4, 3.5, 7.6), c + Vector3(-4.8, 1.75, 0), wall)
+	solid(root, Vector3(0.4, 3.5, 7.6), c + Vector3(4.8, 1.75, 0), wall)
 	for x in [-2.9, 2.9]:
-		Figure.box(root, Vector3(1.6, 1.1, 0.06), Vector3(x, 1.9, z0 + 4.22), glass)
+		Figure.box(root, Vector3(1.6, 1.1, 0.06), c + Vector3(x, 1.9, 4.22 * f), glass)
 	for x in [-5.02, 5.02]:
-		Figure.box(root, Vector3(0.06, 1.1, 1.8), Vector3(x, 1.9, z0), glass)
+		Figure.box(root, Vector3(0.06, 1.1, 1.8), c + Vector3(x, 1.9, 0), glass)
 	for side in [-1, 1]:
-		var slab := solid(root, Vector3(10.8, 0.3, 5.2), Vector3(0, 5.12, z0 + 2.145 * side), roof)
+		var slab := solid(root, Vector3(10.8, 0.3, 5.2), c + Vector3(0, 5.12, 2.145 * side), roof)
 		slab.rotation.x = 0.6 * side
 	for x in [-4.8, 4.8]:
 		var gable := MeshInstance3D.new()
@@ -272,23 +349,15 @@ static func _house_map(root: Node3D, ground: Color) -> void:
 		pm.size = Vector3(8.0, 2.75, 0.4)
 		gable.mesh = pm
 		gable.material_override = Figure.mat(wall)
-		gable.position = Vector3(x, 3.5 + 1.375, z0)
+		gable.position = c + Vector3(x, 3.5 + 1.375, 0)
 		gable.rotation.y = PI * 0.5
 		root.add_child(gable)
-	solid(root, Vector3(0.8, 2.2, 0.8), Vector3(2.6, 5.6, z0 - 1.5), Color(0.55, 0.25, 0.18))
-	solid(root, Vector3(2.0, 0.1, 1.2), Vector3(0, 0.85, z0 - 1), Color(0.5, 0.3, 0.15))
-	for lx in [-0.9, 0.9]:
-		for lz in [-0.5, 0.5]:
-			solid(root, Vector3(0.1, 0.8, 0.1), Vector3(lx, 0.4, z0 - 1 + lz), Color(0.5, 0.3, 0.15))
-	Figure.box(root, Vector3(1.6, 0.02, 6), Vector3(0, 0.01, -5), Color(0.75, 0.72, 0.68))
-	_tree(root, Vector3(-9, 0, -8), 3.0, false)
-	_tree(root, Vector3(9, 0, -14), 3.5, false)
-	_tree(root, Vector3(10, 0, -4), 3.0, true)
+	solid(root, Vector3(0.8, 2.2, 0.8), c + Vector3(2.6, 5.6, -1.5 * f), roof.darkened(0.2))
 
 
 static func _city(root: Node3D) -> void:
 	_env(root)
-	solid(root, Vector3(200, 1, 200), Vector3(0, -0.5, 0), Color(0.22, 0.22, 0.24))
+	solid(root, Vector3(320, 1, 320), Vector3(0, -0.5, 0), Color(0.22, 0.22, 0.24))
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 1234
 	var palette := [
@@ -296,9 +365,14 @@ static func _city(root: Node3D) -> void:
 		Color(0.6, 0.6, 0.65), Color(0.35, 0.6, 0.45), Color(0.95, 0.95, 0.95),
 	]
 	var window := Color(0.15, 0.25, 0.4)
-	for bx in range(-3, 4):
-		for bz in range(-3, 4):
+	for bx in range(-5, 6):
+		for bz in range(-5, 6):
 			var c := Vector3(bx * 26.0, 0, bz * 26.0)
+			if bx == 2 and bz == -1:
+				# city pool
+				solid(root, Vector3(18, 0.08, 18), c + Vector3(0, 0.04, 0), Color(0.75, 0.75, 0.78))
+				pool(root, c, Vector2(12, 8), 2.0, Color(0.9, 0.9, 0.92), Color(0.2, 0.6, 0.9, 0.65))
+				continue
 			if bx == 0 and bz == 0:
 				solid(root, Vector3(18, 0.08, 18), c + Vector3(0, 0.04, 0), Color(0.3, 0.65, 0.25), stud_mat(Color(0.3, 0.65, 0.25)))
 				solid(root, Vector3(3, 0.6, 3), c + Vector3(0, 0.3, -6), Color(0.7, 0.7, 0.72))
@@ -317,14 +391,14 @@ static func _city(root: Node3D) -> void:
 					Figure.box(root, Vector3(w + 0.06, 1.1, w + 0.06), pos + Vector3(0, f * 3.0 + 1.9, 0), window)
 				Figure.box(root, Vector3(w + 0.3, 0.3, w + 0.3), pos + Vector3(0, h + 0.2, 0), col.darkened(0.2))
 	var yellow := Color(1.0, 0.85, 0.2)
-	for line in [-78.0, -52.0, -26.0, 0.0, 26.0, 52.0, 78.0]:
+	for line in [-156.0, -130.0, -104.0, -78.0, -52.0, -26.0, 0.0, 26.0, 52.0, 78.0, 104.0, 130.0]:
 		var r: float = line + 13.0
-		for i in range(-22, 23):
+		for i in range(-38, 39):
 			Figure.box(root, Vector3(0.2, 0.02, 2.0), Vector3(r, 0.01, i * 4.0), yellow)
 			Figure.box(root, Vector3(2.0, 0.02, 0.2), Vector3(i * 4.0, 0.01, r), yellow)
-	for i in 24:
-		var road := (rng.randi_range(-4, 3) * 26.0) + 13.0
-		var along := rng.randf_range(-80, 80)
+	for i in 70:
+		var road := (rng.randi_range(-6, 5) * 26.0) + 13.0
+		var along := rng.randf_range(-140, 140)
 		var horiz := rng.randf() < 0.5
 		var p := Vector3(road + 2.5, 0, along) if not horiz else Vector3(along, 0, road + 2.5)
 		_car(root, p, horiz, palette[rng.randi() % palette.size()])
@@ -348,25 +422,29 @@ static func _car(root: Node3D, p: Vector3, horiz: bool, col: Color) -> void:
 static func _forest(root: Node3D) -> void:
 	_env(root, Color(0.22, 0.48, 0.95), Color(0.72, 0.84, 1.0), 0.006)
 	var grass := Color(0.25, 0.52, 0.18)
-	_ground(root, grass, 200.0)
+	_ground(root, grass, 500.0)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 777
-	for i in 260:
-		var p := Vector3(rng.randf_range(-95, 95), 0, rng.randf_range(-95, 95))
-		if p.length() < 10.0:
+	for i in 1100:
+		var p := Vector3(rng.randf_range(-230, 230), 0, rng.randf_range(-230, 230))
+		if p.length() < 10.0 or p.distance_to(Vector3(60, 0, -40)) < 30.0:
 			continue
 		_tree(root, p, rng.randf_range(2.5, 5.5), rng.randf() < 0.5)
-	for i in 40:
-		var p := Vector3(rng.randf_range(-90, 90), 0, rng.randf_range(-90, 90))
+	for i in 160:
+		var p := Vector3(rng.randf_range(-225, 225), 0, rng.randf_range(-225, 225))
 		var s := rng.randf_range(0.6, 2.0)
 		solid(root, Vector3(s * 1.3, s, s), p + Vector3(0, s * 0.4, 0), Color(0.5, 0.5, 0.52))
-	for i in 30:
-		var p := Vector3(rng.randf_range(-90, 90), 0, rng.randf_range(-90, 90))
+	for i in 120:
+		var p := Vector3(rng.randf_range(-225, 225), 0, rng.randf_range(-225, 225))
 		Figure.cyl(root, 0.1, 0.4, p + Vector3(0, 0.2, 0), Color(0.95, 0.92, 0.85))
 		Figure.cyl(root, 0.3, 0.15, p + Vector3(0, 0.45, 0), Color(0.85, 0.1, 0.1))
 	solid(root, Vector3(3.0, 0.4, 0.5), Vector3(0, 0.2, -4), TRUNK)
 	solid(root, Vector3(0.5, 0.4, 3.0), Vector3(-4, 0.2, 0), TRUNK)
 	_campfire(root, Vector3(0, 0, 3))
+	# a swimming pond in a clearing
+	pool(root, Vector3(60, 0, -40), Vector2(26, 18), 2.2, Color(0.45, 0.4, 0.35), Color(0.15, 0.45, 0.55, 0.7))
+	for i in 3:
+		solid(root, Vector3(6, 0.4, 0.8), Vector3(40 + i * 7.0, 0.2, -52), TRUNK)
 
 
 static func _campfire(root: Node3D, p: Vector3) -> void:
@@ -384,32 +462,37 @@ static func _campfire(root: Node3D, p: Vector3) -> void:
 
 
 static func _island(root: Node3D) -> void:
-	_env(root, Color(0.22, 0.48, 0.95), Color(0.72, 0.84, 1.0), 0.004)
+	_env(root, Color(0.22, 0.48, 0.95), Color(0.72, 0.84, 1.0), 0.003)
 	var sand := Color(0.93, 0.85, 0.6)
 	var grass := Color(0.3, 0.68, 0.22)
-	solid(root, Vector3(600, 1, 600), Vector3(0, -3.5, 0), sand.darkened(0.25))
-	_water(root, Vector2(600, 600), Vector3(0, -0.35, 0))
-	cone(root, 42.0, 62.0, 3.0, Vector3(0, -1.5, 0), Figure.mat(sand))
-	cone(root, 34.0, 38.0, 0.6, Vector3(0, -0.27, 0), stud_mat(grass))
+	solid(root, Vector3(1400, 1, 1400), Vector3(0, -3.5, 0), sand.darkened(0.25))
+	_water(root, Vector2(1400, 1400), Vector3(0, -0.35, 0))
+	water_zone(root, Vector3(1400, 4, 1400), Vector3(0, -2.35, 0))
+	cone(root, 90.0, 120.0, 3.0, Vector3(0, -1.5, 0), Figure.mat(sand))
+	cone(root, 78.0, 82.0, 0.6, Vector3(0, -0.27, 0), stud_mat(grass))
 	cone(root, 3.0, 14.0, 5.0, Vector3(14, 2.5, 12), stud_mat(grass))
+	cone(root, 5.0, 26.0, 12.0, Vector3(-40, 6.0, -30), stud_mat(grass))
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 4242
-	for i in 22:
+	for i in 140:
 		var a := rng.randf() * TAU
-		var r := rng.randf_range(8.0, 30.0)
+		var r := rng.randf_range(8.0, 74.0)
 		var p := Vector3(cos(a) * r, 0, sin(a) * r)
-		if p.distance_to(Vector3(14, 0, 12)) < 15.0 or p.length() < 6.0:
+		if p.distance_to(Vector3(14, 0, 12)) < 15.0 or p.distance_to(Vector3(-40, 0, -30)) < 28.0 or p.length() < 6.0:
 			continue
 		_tree(root, p, rng.randf_range(2.5, 4.5), rng.randf() < 0.3)
-	for i in 14:
+	for i in 50:
 		var a := rng.randf() * TAU
-		var r := rng.randf_range(36.0, 41.0)
+		var r := rng.randf_range(82.0, 89.0)
 		_palm(root, Vector3(cos(a) * r, 0, sin(a) * r), rng.randf() * TAU)
 	var wood := Color(0.55, 0.38, 0.2)
-	solid(root, Vector3(3, 0.12, 18), Vector3(0, 0.0, 50), wood)
-	for z in [43.0, 49.0, 55.0]:
+	solid(root, Vector3(3, 0.12, 24), Vector3(0, 0.0, 100), wood)
+	for z in [91.0, 99.0, 107.0]:
 		for x in [-1.4, 1.4]:
 			solid(root, Vector3(0.3, 3.0, 0.3), Vector3(x, -1.5, z), wood)
+	# a little rock island out at sea
+	cone(root, 8.0, 14.0, 4.0, Vector3(160, -1.0, -60), Figure.mat(Color(0.55, 0.55, 0.58)))
+	_palm(root, Vector3(160, 1.0, -60), 1.0)
 
 
 # ---------------- new maps ----------------
@@ -417,19 +500,19 @@ static func _island(root: Node3D) -> void:
 static func _desert(root: Node3D) -> void:
 	_env(root, Color(0.35, 0.6, 0.95), Color(0.95, 0.85, 0.65), 0.005, Color(1.0, 0.93, 0.8), 1.3)
 	var sand := Color(0.92, 0.8, 0.52)
-	_ground(root, sand, 220.0)
+	_ground(root, sand, 520.0)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 55
 	# dunes
-	for i in 18:
-		var p := Vector3(rng.randf_range(-95, 95), 0, rng.randf_range(-95, 95))
+	for i in 300:
+		var p := Vector3(rng.randf_range(-230, 230), 0, rng.randf_range(-230, 230))
 		if p.length() < 25.0:
 			continue
 		var r := rng.randf_range(8, 16)
 		var h := rng.randf_range(1.5, 4.0)
 		cone(root, r * 0.2, r, h, p + Vector3(0, h * 0.5, 0), stud_mat(sand.darkened(0.05)))
 	# pyramids
-	for pyr in [[Vector3(0, 0, -45), 14], [Vector3(-30, 0, -60), 10], [Vector3(28, 0, -62), 8]]:
+	for pyr in [[Vector3(0, 0, -45), 14], [Vector3(-30, 0, -60), 10], [Vector3(28, 0, -62), 8], [Vector3(-120, 0, 90), 18], [Vector3(150, 0, -140), 12]]:
 		var base: Vector3 = pyr[0]
 		var steps: int = pyr[1]
 		for s in steps:
@@ -437,8 +520,8 @@ static func _desert(root: Node3D) -> void:
 			solid(root, Vector3(size, 1.0, size), base + Vector3(0, s + 0.5, 0), Color(0.88, 0.75, 0.45).darkened(s * 0.01))
 	# cacti
 	var green := Color(0.25, 0.55, 0.25)
-	for i in 35:
-		var p := Vector3(rng.randf_range(-95, 95), 0, rng.randf_range(-95, 95))
+	for i in 150:
+		var p := Vector3(rng.randf_range(-230, 230), 0, rng.randf_range(-230, 230))
 		if p.length() < 8.0 or p.distance_to(Vector3(0, 0, -45)) < 18.0:
 			continue
 		var h := rng.randf_range(2.0, 4.0)
@@ -450,7 +533,7 @@ static func _desert(root: Node3D) -> void:
 				Figure.box(root, Vector3(0.35, 0.9, 0.35), p + Vector3(0.7 * side, ah + 0.45, 0), green)
 	# oasis
 	var oasis := Vector3(30, 0, 20)
-	Figure.cyl(root, 7.0, 0.04, oasis + Vector3(0, 0.02, 0), Color(0.2, 0.55, 0.85))
+	pool(root, oasis - Vector3(0, 0, 0), Vector2(14, 14), 1.8, Color(0.85, 0.75, 0.5), Color(0.15, 0.5, 0.75, 0.7))
 	for i in 6:
 		var a := TAU * i / 6.0
 		_palm(root, oasis + Vector3(cos(a) * 9.0, 0, sin(a) * 9.0), a)
@@ -463,20 +546,20 @@ static func _desert(root: Node3D) -> void:
 static func _snow(root: Node3D) -> void:
 	_env(root, Color(0.5, 0.65, 0.85), Color(0.88, 0.92, 0.98), 0.012, Color(0.95, 0.97, 1.0), 0.9)
 	var snow := Color(0.95, 0.97, 1.0)
-	_ground(root, snow, 220.0)
+	_ground(root, snow, 520.0)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 909
-	for i in 140:
-		var p := Vector3(rng.randf_range(-95, 95), 0, rng.randf_range(-95, 95))
+	for i in 600:
+		var p := Vector3(rng.randf_range(-230, 230), 0, rng.randf_range(-230, 230))
 		if p.length() < 12.0:
 			continue
 		_tree(root, p, rng.randf_range(2.5, 5.0), true, true)
 	# mountains around the edge
-	for i in 14:
-		var a := TAU * i / 14.0
+	for i in 28:
+		var a := TAU * i / 28.0
 		var r := rng.randf_range(16, 30)
 		var h := rng.randf_range(15, 35)
-		var p := Vector3(cos(a) * 105.0, h * 0.5, sin(a) * 105.0)
+		var p := Vector3(cos(a) * 255.0, h * 0.5, sin(a) * 255.0)
 		cone(root, 0.5, r, h, p, Figure.mat(Color(0.7, 0.72, 0.78)))
 		Figure.cyl(root, 0.5, h * 0.35, p + Vector3(0, h * 0.325, 0), snow, r * 0.35)
 	# frozen lake
@@ -507,6 +590,8 @@ static func _snow(root: Node3D) -> void:
 			Figure.box(root, Vector3(0.08, 0.08, 0.05), p + Vector3(x, 3.2, -0.42), Figure.BLACK)
 		Figure.cyl(root, 0.3, 0.4, p + Vector3(0, 3.6, 0), Figure.BLACK)
 	_campfire(root, Vector3(0, 0, -8))
+	for i in 3:
+		_snowman_row(root, Vector3(-60 + i * 50.0, 0, 70))
 	_snowfall(root)
 
 
@@ -540,12 +625,12 @@ static func _snowfall(root: Node3D) -> void:
 static func _moon(root: Node3D) -> void:
 	_env(root, Color(0.0, 0.0, 0.02), Color(0.03, 0.03, 0.06), 0.0, Color(1.0, 1.0, 0.97), 1.4, -35.0)
 	var dust := Color(0.62, 0.62, 0.64)
-	_ground(root, dust, 220.0)
+	_ground(root, dust, 520.0)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 1969
 	# craters: dark floor with a raised rim
-	for i in 25:
-		var p := Vector3(rng.randf_range(-90, 90), 0, rng.randf_range(-90, 90))
+	for i in 90:
+		var p := Vector3(rng.randf_range(-225, 225), 0, rng.randf_range(-225, 225))
 		if p.length() < 12.0:
 			continue
 		var r := rng.randf_range(3, 10)
@@ -559,8 +644,8 @@ static func _moon(root: Node3D) -> void:
 		rim.material_override = Figure.mat(dust.lightened(0.05))
 		rim.position = p
 		root.add_child(rim)
-	for i in 50:
-		var p := Vector3(rng.randf_range(-95, 95), 0, rng.randf_range(-95, 95))
+	for i in 200:
+		var p := Vector3(rng.randf_range(-230, 230), 0, rng.randf_range(-230, 230))
 		var s := rng.randf_range(0.3, 1.5)
 		solid(root, Vector3(s * 1.2, s * 0.7, s), p + Vector3(0, s * 0.3, 0), dust.darkened(0.15))
 	# lunar lander
@@ -598,7 +683,7 @@ static func _moon(root: Node3D) -> void:
 
 static func _castle(root: Node3D, ground: Color) -> void:
 	_env(root)
-	_ground(root, ground, 180.0)
+	_ground(root, ground, 440.0)
 	var stone := Color(0.62, 0.6, 0.58)
 	var c := Vector3(0, 0, -25)
 	var half := 15.0
@@ -650,19 +735,30 @@ static func _castle(root: Node3D, ground: Color) -> void:
 		Figure.box(root, Vector3(1.0, 0.8, 1.0), c + Vector3(i * 2.0, 10.4, -3.4), stone)
 	_tree(root, Vector3(-25, 0, 10), 3.5, false)
 	_tree(root, Vector3(24, 0, 12), 3.0, false)
+	# a village outside the walls
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 1066
+	for i in 10:
+		var hp := Vector3(-70 + (i % 5) * 32.0, 0, 50 + (i / 5) * 34.0)
+		_house(root, hp, Color(0.92, 0.86, 0.7), [Color(0.55, 0.25, 0.15), Color(0.35, 0.3, 0.3), Color(0.6, 0.45, 0.2)][i % 3], 0.7)
+	for i in 120:
+		var p := Vector3(rng.randf_range(-210, 210), 0, rng.randf_range(-210, 210))
+		if absf(p.x) < 90 and p.z > -70 and p.z < 130:
+			continue
+		_tree(root, p, rng.randf_range(2.5, 5.0), rng.randf() < 0.5)
 
 
 static func _candy(root: Node3D) -> void:
 	_env(root, Color(0.6, 0.55, 0.95), Color(1.0, 0.8, 0.9), 0.004, Color(1.0, 0.95, 0.95))
-	_ground(root, Color(1.0, 0.7, 0.82), 200.0)
+	_ground(root, Color(1.0, 0.7, 0.82), 480.0)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 314
 	var candy := [Color(1.0, 0.3, 0.4), Color(0.4, 0.8, 1.0), Color(0.6, 1.0, 0.5), Color(1.0, 0.9, 0.3), Color(0.8, 0.5, 1.0), Color(1.0, 0.6, 0.2)]
 	# chocolate river
-	Figure.box(root, Vector3(8, 0.04, 200), Vector3(-25, 0.02, 0), Color(0.4, 0.22, 0.1))
+	Figure.box(root, Vector3(8, 0.04, 480), Vector3(-25, 0.02, 0), Color(0.4, 0.22, 0.1))
 	solid(root, Vector3(3, 0.1, 10), Vector3(-25, 0.05, 0), Color(1.0, 0.95, 0.9))
 	for i in 70:
-		var p := Vector3(rng.randf_range(-95, 95), 0, rng.randf_range(-95, 95))
+		var p := Vector3(rng.randf_range(-230, 230), 0, rng.randf_range(-230, 230))
 		if p.length() < 10.0 or absf(p.x + 25.0) < 6.0:
 			continue
 		var col: Color = candy[rng.randi() % candy.size()]
@@ -688,6 +784,8 @@ static func _candy(root: Node3D) -> void:
 			4: # cotton candy tree
 				solid(root, Vector3(0.25, 3.0, 0.25), p + Vector3(0, 1.5, 0), Color.WHITE)
 				Figure.sphere(root, 1.6, p + Vector3(0, 3.8, 0), col.lightened(0.5))
+	# lemonade lake you can swim in
+	pool(root, Vector3(40, 0, 45), Vector2(30, 22), 2.0, Color(1.0, 0.85, 0.95), Color(1.0, 0.9, 0.3, 0.65))
 	# gingerbread house
 	var g := Vector3(15, 0, -15)
 	var ginger := Color(0.7, 0.42, 0.2)
@@ -705,7 +803,7 @@ static func _volcano(root: Node3D) -> void:
 	var env := _env(root, Color(0.25, 0.08, 0.05), Color(0.65, 0.3, 0.15), 0.01, Color(1.0, 0.6, 0.4), 0.9)
 	env.glow_intensity = 1.2
 	var rock := Color(0.2, 0.18, 0.17)
-	_ground(root, rock, 220.0)
+	_ground(root, rock, 520.0)
 	var lava := Color(1.0, 0.4, 0.05)
 	var lava_mat := Figure.glow_mat(lava)
 	# the volcano
@@ -726,16 +824,16 @@ static func _volcano(root: Node3D) -> void:
 	var river := Figure.box(root, Vector3(4, 0.05, 60), Vector3(-8, 0.025, -20), lava)
 	river.material_override = lava_mat
 	kill_zone(root, Vector3(4, 1, 60), Vector3(-8, 0.3, -20))
-	for i in 10:
-		var p := Vector3(rng.randf_range(-80, 80), 0, rng.randf_range(-60, 80))
+	for i in 30:
+		var p := Vector3(rng.randf_range(-200, 200), 0, rng.randf_range(-60, 200))
 		if p.length() < 12.0 or absf(p.x + 8.0) < 6.0:
 			continue
 		var r := rng.randf_range(2, 5)
 		Figure.cyl(root, r, 0.05, p + Vector3(0, 0.025, 0), lava).material_override = lava_mat
 		kill_zone(root, Vector3(r * 1.4, 1, r * 1.4), p + Vector3(0, 0.3, 0))
 	# rocks and dead trees
-	for i in 60:
-		var p := Vector3(rng.randf_range(-95, 95), 0, rng.randf_range(-95, 95))
+	for i in 250:
+		var p := Vector3(rng.randf_range(-230, 230), 0, rng.randf_range(-230, 230))
 		if p.length() < 8.0:
 			continue
 		if rng.randf() < 0.7:
@@ -756,6 +854,8 @@ static func _sky_islands(root: Node3D) -> void:
 	var islands := [
 		[Vector3(0, 0, 0), 14.0], [Vector3(36, 6, -10), 9.0], [Vector3(-30, -4, -22), 10.0],
 		[Vector3(8, 12, -45), 8.0], [Vector3(-12, 3, 38), 11.0], [Vector3(45, -2, 30), 7.0],
+		[Vector3(90, 10, 5), 16.0], [Vector3(-80, 8, 10), 13.0], [Vector3(-45, 18, -85), 12.0],
+		[Vector3(40, -6, 85), 15.0], [Vector3(110, 20, -70), 10.0], [Vector3(-110, -2, 80), 18.0],
 	]
 	for isl in islands:
 		var p: Vector3 = isl[0]
@@ -763,9 +863,11 @@ static func _sky_islands(root: Node3D) -> void:
 		cone(root, r, r * 0.3, r * 0.8, p + Vector3(0, -r * 0.4 - 0.5, 0), Figure.mat(dirt))
 		cone(root, r, r, 1.0, p + Vector3(0, -0.5, 0), stud_mat(grass))
 		_tree(root, p + Vector3(r * 0.4, 0, -r * 0.3), 3.0, false)
+		if r > 14.0:
+			pool(root, p + Vector3(-r * 0.3, 0, r * 0.2), Vector2(r * 0.5, r * 0.4), 1.6, Color(0.6, 0.6, 0.62), Color(0.2, 0.6, 0.95, 0.65))
 	# bridges between islands
 	var wood := Color(0.6, 0.42, 0.22)
-	for pair in [[0, 1], [0, 2], [1, 3], [0, 4], [1, 5]]:
+	for pair in [[0, 1], [0, 2], [1, 3], [0, 4], [1, 5], [1, 6], [2, 7], [3, 8], [5, 9], [6, 10], [7, 11]]:
 		var a: Vector3 = islands[pair[0]][0]
 		var b: Vector3 = islands[pair[1]][0]
 		var dir := (b - a)
@@ -779,8 +881,8 @@ static func _sky_islands(root: Node3D) -> void:
 	# clouds
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 8080
-	for i in 40:
-		var p := Vector3(rng.randf_range(-120, 120), rng.randf_range(-30, 25), rng.randf_range(-120, 120))
+	for i in 90:
+		var p := Vector3(rng.randf_range(-220, 220), rng.randf_range(-40, 40), rng.randf_range(-220, 220))
 		if p.length() < 25.0:
 			continue
 		for j in 3:
@@ -789,7 +891,7 @@ static func _sky_islands(root: Node3D) -> void:
 
 static func _stadium(root: Node3D) -> void:
 	_env(root)
-	_ground(root, Color(0.3, 0.55, 0.25), 200.0)
+	_ground(root, Color(0.3, 0.55, 0.25), 420.0)
 	var line := Color(0.95, 0.95, 0.95)
 	var fw := 34.0
 	var fl := 54.0
@@ -839,7 +941,7 @@ static func _stadium(root: Node3D) -> void:
 
 static func _dodgeball(root: Node3D) -> void:
 	_env(root, Color(0.3, 0.5, 0.9), Color(0.8, 0.85, 0.95))
-	_ground(root, Color(0.35, 0.55, 0.3), 140.0)
+	_ground(root, Color(0.35, 0.55, 0.3), 300.0)
 	var wood := Color(0.82, 0.62, 0.38)
 	var red := Color(0.85, 0.15, 0.15)
 	var blue := Color(0.15, 0.35, 0.85)

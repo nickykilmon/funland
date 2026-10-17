@@ -23,7 +23,7 @@ static func can_merge(mi: MeshInstance3D) -> bool:
 	var m := mi.material_override as StandardMaterial3D
 	if m == null:
 		return false
-	return m.albedo_texture == null and m.transparency == BaseMaterial3D.TRANSPARENCY_DISABLED \
+	return m.transparency == BaseMaterial3D.TRANSPARENCY_DISABLED \
 		and not m.emission_enabled and m.shading_mode == BaseMaterial3D.SHADING_MODE_PER_PIXEL
 
 
@@ -89,7 +89,8 @@ static func merge(root: Node3D) -> void:
 	for key in groups:
 		var mi := MeshInstance3D.new()
 		mi.name = "Merged"
-		mi.mesh = groups[key].to_mesh(material())
+		# textured parts (world-mapped studs) keep their own material; plain ones share the vertex-color one
+		mi.mesh = groups[key].to_mesh(key[1] if key[1] != null else material())
 		root.add_child(mi)
 
 
@@ -97,7 +98,8 @@ static func _collect(node: Node, root: Node3D, groups: Dictionary, merged: Array
 	for c in node.get_children():
 		if c is MeshInstance3D and c.visible and can_merge(c):
 			var t := relative_xform(c, root)
-			var key := Vector3i((t.origin / CELL).floor())
+			var m := c.material_override as StandardMaterial3D
+			var key := [Vector3i((t.origin / CELL).floor()), m if m.albedo_texture != null else null]
 			if not groups.has(key):
 				groups[key] = Group.new()
 			groups[key].add(c.mesh, t, (c.material_override as StandardMaterial3D).albedo_color)
