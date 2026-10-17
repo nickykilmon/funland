@@ -23,6 +23,7 @@ var map_opt: OptionButton
 var plane_pick: ColorPickerButton
 var build_opt: OptionButton
 var limit_opt: OptionButton
+var host_btn: Button
 var code_edit: LineEdit
 var room_list: VBoxContainer
 var status: Label
@@ -129,7 +130,7 @@ func _ready() -> void:
 	for l in LIMITS:
 		limit_opt.add_item("Unlimited" if l == 0 else "%d each" % l)
 	_row(right, "Brick limit", limit_opt)
-	var host_btn := Button.new()
+	host_btn = Button.new()
 	host_btn.text = "Host Game"
 	host_btn.custom_minimum_size.y = 38
 	host_btn.pressed.connect(_on_host)
@@ -177,6 +178,8 @@ func _ready() -> void:
 		status.text = Engine.get_meta("menu_msg")
 		Engine.remove_meta("menu_msg")
 	_refresh_rooms.call_deferred()
+	if not Input.get_connected_joypads().is_empty():
+		host_btn.grab_focus.call_deferred()
 
 
 func _process(delta: float) -> void:

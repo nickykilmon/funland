@@ -66,6 +66,7 @@ var loaded_build := ""
 var list_ws: WebSocketPeer
 var list_sent := false
 var auto_join := false
+var using_pad := false
 
 # dodgeball (decided by the host, copied to everyone)
 var dodge_state := "waiting"   # waiting / build / playing / roundover
@@ -80,11 +81,33 @@ func _ready() -> void:
 	multiplayer.server_disconnected.connect(_on_server_disconnected)
 	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_add_pad_ui_controls()
 	menu = MenuScript.new()
 	add_child(menu)
 	menu.host_requested.connect(host_game)
 	menu.join_requested.connect(join_game)
 	_handle_test_args()
+
+
+# Lets a controller click buttons (A), go back (B) and move around menus (d-pad / left stick).
+func _add_pad_ui_controls() -> void:
+	var binds := {
+		"ui_accept": [JOY_BUTTON_A], "ui_cancel": [JOY_BUTTON_B],
+		"ui_up": [JOY_BUTTON_DPAD_UP], "ui_down": [JOY_BUTTON_DPAD_DOWN],
+		"ui_left": [JOY_BUTTON_DPAD_LEFT], "ui_right": [JOY_BUTTON_DPAD_RIGHT],
+	}
+	for action in binds:
+		for b in binds[action]:
+			var ev := InputEventJoypadButton.new()
+			ev.button_index = b
+			if not InputMap.action_has_event(action, ev):
+				InputMap.action_add_event(action, ev)
+	for pair in [["ui_up", JOY_AXIS_LEFT_Y, -1.0], ["ui_down", JOY_AXIS_LEFT_Y, 1.0], ["ui_left", JOY_AXIS_LEFT_X, -1.0], ["ui_right", JOY_AXIS_LEFT_X, 1.0]]:
+		var m := InputEventJoypadMotion.new()
+		m.axis = pair[1]
+		m.axis_value = pair[2]
+		if not InputMap.action_has_event(pair[0], m):
+			InputMap.action_add_event(pair[0], m)
 
 
 func is_dodgeball() -> bool:
@@ -1308,6 +1331,29 @@ func _handle_test_args() -> void:
 				print("TEST client state before hit: ", dodge_state, " alive=", alive.keys(), " balls=", entities.size(), " budget=", hud.budget)
 				request_place(Vector3(10.2, 0.24 + 0.06, 3.2), Vector3i(2, 3, 4), Color.BLUE, 0, 0)
 				report_ball_hit(0, 1, "blue"))
+		elif a == "autopad":
+			get_tree().create_timer(3.0).timeout.connect(func():
+				var p := local_player()
+				var start: Vector3 = p.position
+				var m := InputEventJoypadMotion.new()
+				m.axis = JOY_AXIS_LEFT_Y
+				m.axis_value = -1.0
+				Input.parse_input_event(m)
+				await get_tree().create_timer(1.5).timeout
+				print("TEST pad walk moved ", snappedf(p.position.distance_to(start), 0.1), " m, using_pad=", using_pad)
+				m.axis_value = 0.0
+				Input.parse_input_event(m)
+				for e in entities.values():
+					if e.type == 13:
+						request_drive(e.ent_id, true)
+						var car_start: Vector3 = e.position
+						var rt := InputEventJoypadMotion.new()
+						rt.axis = JOY_AXIS_TRIGGER_RIGHT
+						rt.axis_value = 1.0
+						Input.parse_input_event(rt)
+						await get_tree().create_timer(2.0).timeout
+						print("TEST pad car moved ", snappedf(e.position.distance_to(car_start), 0.1), " m, driving=", p.vehicle != null)
+						break)
 		elif a == "autoteam":
 			get_tree().create_timer(2.5).timeout.connect(func(): request_team("red" if multiplayer.is_server() else "blue"))
 		elif a.begins_with("autosave="):

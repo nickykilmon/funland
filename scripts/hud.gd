@@ -16,6 +16,10 @@ B spawn menu · Click grab/drop · Right click throw · X delete · F drive / do
 E funbrick tool · G wave · H dance · C sit"""
 const DODGE_HELP := """WASD move · Space jump · Shift run · V camera · T chat · Tab players
 Click grab a ball · Right click throw · E build defenses (build phase)"""
+const PAD_HELP := """Controller: left stick move · right stick look · A jump · L3 run · R3 camera
+RT grab/place · LT throw/remove · X drive/door · Y brick tool · B delete/undo
+LB/RB distance or color · D-pad emotes (tool: size/shape/rotate) · Back spawn menu
+Driving: RT gas/up · LT brake/down · stick steer · Y flip"""
 const DRIVE_HELP := {
 	Entities.CAR: "W/S drive · A/D steer · Space brake · R flip over · F get out",
 	Entities.HELI: "W/S forward/back · A/D turn · Space up · Shift down · F get out",
@@ -44,6 +48,10 @@ var big_timer := 0.0
 var budget := -1
 var dodgeball := false
 var last_tool := []
+var pause_open := false
+var resume_btn: Button
+var spawn_first: Button
+var team_first: Button
 
 
 func _ready() -> void:
@@ -169,10 +177,12 @@ func _build_pause_panel() -> void:
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.add_theme_font_size_override("font_size", 24)
 	vb.add_child(title)
-	var resume := Button.new()
-	resume.text = "Resume (click the game)"
-	resume.pressed.connect(func(): Input.mouse_mode = Input.MOUSE_MODE_CAPTURED)
-	vb.add_child(resume)
+	resume_btn = Button.new()
+	resume_btn.text = "Resume (click the game)"
+	resume_btn.pressed.connect(func():
+		pause_open = false
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED)
+	vb.add_child(resume_btn)
 	save_row = HBoxContainer.new()
 	vb.add_child(save_row)
 	save_edit = LineEdit.new()
@@ -191,6 +201,11 @@ func _build_pause_panel() -> void:
 	leave.text = "Leave game"
 	leave.pressed.connect(func(): leave_pressed.emit())
 	vb.add_child(leave)
+	var pad_help := Label.new()
+	pad_help.text = PAD_HELP
+	pad_help.add_theme_font_size_override("font_size", 11)
+	pad_help.modulate.a = 0.75
+	vb.add_child(pad_help)
 	pause_status = Label.new()
 	pause_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	pause_status.add_theme_color_override("font_color", Color(1.0, 0.85, 0.4))
@@ -204,7 +219,12 @@ func _process(delta: float) -> void:
 	team_panel.visible = dodgeball and my_team == ""
 	if team_panel.visible or spawn_panel.visible:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	var paused := Input.mouse_mode != Input.MOUSE_MODE_CAPTURED and not is_typing() and not team_panel.visible and not spawn_panel.visible
+	var pad: bool = get_parent().using_pad
+	var paused := (pause_open or (Input.mouse_mode != Input.MOUSE_MODE_CAPTURED and not pad)) and not is_typing() and not team_panel.visible and not spawn_panel.visible
+	if team_panel.visible and pad and get_viewport().gui_get_focus_owner() == null:
+		team_first.grab_focus()
+	if paused and pad and get_viewport().gui_get_focus_owner() == null:
+		resume_btn.grab_focus()
 	if paused and not pause_panel.visible:
 		save_row.visible = is_host
 		clear_btn.visible = is_host
@@ -326,6 +346,8 @@ func _build_spawn_menu() -> void:
 			b.text = Entities.TYPES[t]["name"]
 			b.custom_minimum_size = Vector2(150, 34)
 			var type: int = t
+			if spawn_first == null:
+				spawn_first = b
 			b.pressed.connect(func():
 				spawn_panel.visible = false
 				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -340,6 +362,31 @@ func _build_spawn_menu() -> void:
 func toggle_spawn_menu() -> void:
 	spawn_panel.visible = not spawn_panel.visible
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if spawn_panel.visible else Input.MOUSE_MODE_CAPTURED
+	if spawn_panel.visible and get_parent().using_pad:
+		spawn_first.grab_focus()
+
+
+func toggle_pause() -> void:
+	pause_open = not pause_open
+	if not pause_open and not get_parent().using_pad:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+# Any menu that wants the controller's buttons for itself.
+func menu_open() -> bool:
+	return pause_panel.visible or spawn_panel.visible or team_panel.visible
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	# B (cancel) closes the spawn menu / pause menu on a controller
+	var jb := event as InputEventJoypadButton
+	if jb and jb.pressed and jb.button_index == JOY_BUTTON_B:
+		if spawn_panel.visible:
+			toggle_spawn_menu()
+			get_viewport().set_input_as_handled()
+		elif pause_open:
+			toggle_pause()
+			get_viewport().set_input_as_handled()
 
 
 func _unhandled_key_input(event: InputEvent) -> void:
@@ -387,7 +434,10 @@ func _build_team_panel() -> void:
 		hover.bg_color = (t[2] as Color).lightened(0.2)
 		b.add_theme_stylebox_override("hover", hover)
 		var team: String = t[1]
+		if team_first == null:
+			team_first = b
 		b.pressed.connect(func():
+			team_panel.release_focus()
 			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 			team_chosen.emit(team))
 		row.add_child(b)

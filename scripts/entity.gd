@@ -134,12 +134,19 @@ func _vehicle(delta: float) -> void:
 	var space_key := false
 	var shift := false
 	var ctrl := false
-	if driving and not (main.hud and main.hud.is_typing()):
+	var stick_y := 0.0   # controller left stick, up = +
+	var rt := 0.0
+	var lt := 0.0
+	if driving and not (main.hud and (main.hud.is_typing() or main.hud.menu_open())):
 		w = float(Input.is_physical_key_pressed(KEY_W)) - float(Input.is_physical_key_pressed(KEY_S))
 		s = float(Input.is_physical_key_pressed(KEY_A)) - float(Input.is_physical_key_pressed(KEY_D))
-		space_key = Input.is_physical_key_pressed(KEY_SPACE)
+		space_key = Input.is_physical_key_pressed(KEY_SPACE) or Input.is_joy_button_pressed(0, JOY_BUTTON_A)
 		shift = Input.is_physical_key_pressed(KEY_SHIFT)
 		ctrl = Input.is_physical_key_pressed(KEY_CTRL)
+		s = clampf(s - _stick(JOY_AXIS_LEFT_X), -1.0, 1.0)
+		stick_y = -_stick(JOY_AXIS_LEFT_Y)
+		rt = Input.get_joy_axis(0, JOY_AXIS_TRIGGER_RIGHT)
+		lt = Input.get_joy_axis(0, JOY_AXIS_TRIGGER_LEFT)
 	# park: let a vehicle nobody is driving fall asleep once it has settled
 	if not driving:
 		if linear_velocity.length() < 0.08 and angular_velocity.length() < 0.08:
@@ -155,13 +162,16 @@ func _vehicle(delta: float) -> void:
 		still_time = 0.0
 	match cfg["kind"]:
 		Entities.CAR:
-			grounded = _suspension(delta, w, s, space_key or not driving, 8.0, true)
+			# controller: right trigger gas, left trigger brake/reverse, A handbrake
+			grounded = _suspension(delta, clampf(w + rt - lt, -1.0, 1.0), s, space_key or not driving, 8.0, true)
 		Entities.HELI:
+			# controller: left stick fly/turn, right trigger up, left trigger down
 			grounded = _suspension(delta, 0.0, 0.0, true, 6.0, false)
-			_heli(delta, driving, w, s, (1.0 if space_key else 0.0) - (1.0 if shift else 0.0))
+			_heli(delta, driving, clampf(w + stick_y, -1.0, 1.0), s, (1.0 if space_key else 0.0) - (1.0 if shift else 0.0) + rt - lt)
 		Entities.PLANE:
+			# controller: left stick pitch/roll (push forward = nose down), triggers throttle
 			grounded = _suspension(delta, 0.0, s, not driving or (w < 0 and throttle == 0.0), 6.0, false)
-			_plane(delta, driving, w, s, shift, ctrl)
+			_plane(delta, driving, clampf(w + stick_y, -1.0, 1.0), s, float(shift) + rt, float(ctrl) + lt)
 
 
 # Raycast suspension: each wheel pushes the body up like a spring, grips sideways and drives forward.
@@ -234,9 +244,9 @@ func _heli(delta: float, driving: bool, fwd_in: float, turn_in: float, lift_in: 
 	angular_velocity = angular_velocity.lerp(correction + Vector3.UP * turn_in * 1.6, 0.25)
 
 
-func _plane(delta: float, driving: bool, pitch_in: float, roll_in: float, thr_up: bool, thr_down: bool) -> void:
+func _plane(delta: float, driving: bool, pitch_in: float, roll_in: float, thr_up: float, thr_down: float) -> void:
 	if driving:
-		throttle = clampf(throttle + (float(thr_up) - float(thr_down)) * 0.6 * delta, 0.0, 1.0)
+		throttle = clampf(throttle + (minf(thr_up, 1.0) - minf(thr_down, 1.0)) * 0.6 * delta, 0.0, 1.0)
 	else:
 		throttle = move_toward(throttle, 0.0, delta)
 	rotor_speed = throttle
@@ -257,6 +267,11 @@ func _plane(delta: float, driving: bool, pitch_in: float, roll_in: float, thr_up
 		if grounded > 0:
 			local.z = 0.0
 		angular_velocity = angular_velocity.lerp(b * local, 0.12)
+
+
+static func _stick(axis: JoyAxis) -> float:
+	var v := Input.get_joy_axis(0, axis)
+	return 0.0 if absf(v) < 0.2 else v
 
 
 func flip_upright() -> void:

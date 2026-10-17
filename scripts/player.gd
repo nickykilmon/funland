@@ -13,6 +13,8 @@ const JUMP_SPEED := 6.8
 const MOUSE_SENS := 0.0025
 const REACH := 9.0
 const THIRD_PERSON_DIST := 3.5
+const DEADZONE := 0.2
+const STICK_LOOK := 3.2   # radians per second at full right-stick tilt
 const TEAM_COLORS := {"red": Color(1.0, 0.35, 0.35), "blue": Color(0.45, 0.65, 1.0)}
 
 enum { ANIM_NONE, ANIM_WAVE, ANIM_DANCE, ANIM_SIT }
@@ -62,6 +64,11 @@ var place_pos := Vector3.ZERO
 var last_place_pos := Vector3.INF
 var last_painted := -1
 var hold_timer := 0.0
+
+# controller
+var pad_sprint := false
+var rt_was := false
+var lt_was := false
 
 
 func _ready() -> void:
@@ -187,18 +194,24 @@ func _local_physics(delta: float) -> void:
 	var typing: bool = main.hud != null and main.hud.is_typing()
 	var input := Vector2.ZERO
 	var jumped := false
-	if not typing:
+	var menus: bool = typing or main.hud.menu_open()
+	if not menus:
 		if Input.is_physical_key_pressed(KEY_W): input.y -= 1
 		if Input.is_physical_key_pressed(KEY_S): input.y += 1
 		if Input.is_physical_key_pressed(KEY_A): input.x -= 1
 		if Input.is_physical_key_pressed(KEY_D): input.x += 1
-		if Input.is_physical_key_pressed(KEY_SPACE) and is_on_floor():
+		input += Vector2(stick(JOY_AXIS_LEFT_X), stick(JOY_AXIS_LEFT_Y))
+		input = input.limit_length(1.0)
+		if (Input.is_physical_key_pressed(KEY_SPACE) or Input.is_joy_button_pressed(0, JOY_BUTTON_A)) and is_on_floor():
 			velocity.y = JUMP_SPEED
 			jumped = true
+	if input.length() < 0.1:
+		pad_sprint = false
 	if (input != Vector2.ZERO or jumped) and anim != ANIM_WAVE:
 		anim = ANIM_NONE
-	var speed := RUN_SPEED if not typing and Input.is_physical_key_pressed(KEY_SHIFT) else WALK_SPEED
-	var dir := (transform.basis * Vector3(input.x, 0, input.y)).normalized()
+	var running := not menus and (Input.is_physical_key_pressed(KEY_SHIFT) or pad_sprint)
+	var speed := RUN_SPEED if running else WALK_SPEED
+	var dir := transform.basis * Vector3(input.x, 0, input.y)
 	var accel := 50.0 if is_on_floor() else 15.0
 	velocity.x = move_toward(velocity.x, dir.x * speed, accel * delta)
 	velocity.z = move_toward(velocity.z, dir.z * speed, accel * delta)
@@ -207,10 +220,13 @@ func _local_physics(delta: float) -> void:
 	if position.y < -30.0 or _in_kill_zone():
 		respawn()
 	_send(delta, -1)
+	_pad_look(delta)
+	_pad_triggers(menus)
 	_update_held()
 	_update_ghost()
-	# hold the mouse button to keep placing / painting
-	if tool_on and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+	# hold the mouse button (or right trigger) to keep placing / painting
+	var holding := (Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)) or (rt_was and not menus)
+	if tool_on and holding:
 		hold_timer -= delta
 		if hold_timer <= 0.0:
 			hold_timer = 0.1
@@ -308,6 +324,14 @@ func _swing(part: String, angle: float) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if not is_local:
 		return
+	if event is InputEventJoypadButton or event is InputEventJoypadMotion:
+		main.using_pad = true
+	elif event is InputEventMouseButton or event is InputEventKey:
+		main.using_pad = false
+	if event is InputEventJoypadButton and event.pressed:
+		if not main.hud.menu_open() or (event as InputEventJoypadButton).button_index == JOY_BUTTON_START:
+			_pad_button((event as InputEventJoypadButton).button_index)
+		return
 	var captured := Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
 	if event is InputEventMouseMotion and captured:
 		var mm := event as InputEventMouseMotion
@@ -348,20 +372,15 @@ func _key(ke: InputEventKey) -> void:
 		return
 	match key:
 		KEY_E:
-			tool_on = not tool_on
-			_drop()
-			_rebuild_ghost()
+			_toggle_tool()
 		KEY_B:
-			if not main.is_dodgeball():
-				main.hud.toggle_spawn_menu()
+			_spawn_menu()
 		KEY_Q:
 			if tool_on:
-				shape = posmod(shape + (-1 if ke.shift_pressed else 1), Bricks.SHAPES.size())
-				_rebuild_ghost()
+				_shape_step(-1 if ke.shift_pressed else 1)
 		KEY_R:
 			if tool_on:
-				rot = (rot + 1) % 4
-				_rebuild_ghost()
+				_rotate()
 		KEY_P:
 			paint_mode = not paint_mode
 			tool_on = true
@@ -388,6 +407,124 @@ func _key(ke: InputEventKey) -> void:
 			var sizes: Array = Bricks.SHAPES[shape]["sizes"]
 			if tool_on and key >= KEY_1 and key <= KEY_9 and key - KEY_1 < sizes.size():
 				size_idx[shape] = key - KEY_1
+				_rebuild_ghost()
+
+
+func _toggle_tool() -> void:
+	tool_on = not tool_on
+	_drop()
+	_rebuild_ghost()
+
+
+func _spawn_menu() -> void:
+	if not main.is_dodgeball():
+		main.hud.toggle_spawn_menu()
+
+
+func _shape_step(d: int) -> void:
+	shape = posmod(shape + d, Bricks.SHAPES.size())
+	_rebuild_ghost()
+
+
+func _size_step(d: int) -> void:
+	var sizes: Array = Bricks.SHAPES[shape]["sizes"]
+	size_idx[shape] = posmod(size_idx[shape] + d, sizes.size())
+	_rebuild_ghost()
+
+
+func _rotate() -> void:
+	rot = (rot + 1) % 4
+	_rebuild_ghost()
+
+
+# ---------------- Controller ----------------
+
+static func stick(axis: JoyAxis) -> float:
+	var v := Input.get_joy_axis(0, axis)
+	return 0.0 if absf(v) < DEADZONE else v
+
+
+func _pad_look(delta: float) -> void:
+	var look := Vector2(stick(JOY_AXIS_RIGHT_X), stick(JOY_AXIS_RIGHT_Y))
+	if look == Vector2.ZERO or main.hud.menu_open():
+		return
+	# a curve so small tilts aim finely and full tilt turns fast
+	look = look * look.length()
+	rotate_y(-look.x * STICK_LOOK * delta)
+	pitch = clampf(pitch - look.y * STICK_LOOK * 0.7 * delta, -1.5, 1.5)
+	arm.rotation.x = pitch
+
+
+# Right trigger = left click, left trigger = right click (only on the press, like a mouse click).
+func _pad_triggers(menus: bool) -> void:
+	var rt := Input.get_joy_axis(0, JOY_AXIS_TRIGGER_RIGHT) > 0.5
+	var lt := Input.get_joy_axis(0, JOY_AXIS_TRIGGER_LEFT) > 0.5
+	if not menus and not vehicle:
+		if rt and not rt_was:
+			if tool_on:
+				_tool_click(MOUSE_BUTTON_LEFT)
+			else:
+				_hands_click(MOUSE_BUTTON_LEFT)
+		if lt and not lt_was:
+			if tool_on:
+				_tool_click(MOUSE_BUTTON_RIGHT)
+			else:
+				_hands_click(MOUSE_BUTTON_RIGHT)
+	rt_was = rt
+	lt_was = lt
+
+
+func _pad_button(b: int) -> void:
+	match b:
+		JOY_BUTTON_START:
+			main.hud.toggle_pause()
+			return
+		JOY_BUTTON_X:
+			_use()
+			return
+		JOY_BUTTON_RIGHT_STICK:
+			_set_view(not third_person)
+			return
+	if vehicle:
+		if b == JOY_BUTTON_Y and vehicle.is_mine():
+			vehicle.flip_upright()
+		return
+	match b:
+		JOY_BUTTON_Y:
+			_toggle_tool()
+		JOY_BUTTON_B:
+			if tool_on:
+				main.request_undo()
+			else:
+				_delete_looked_at()
+		JOY_BUTTON_BACK:
+			_spawn_menu()
+		JOY_BUTTON_LEFT_STICK:
+			pad_sprint = not pad_sprint
+		JOY_BUTTON_LEFT_SHOULDER:
+			if tool_on:
+				_set_color(color_idx - 1)
+			else:
+				_hands_click(MOUSE_BUTTON_WHEEL_DOWN)
+		JOY_BUTTON_RIGHT_SHOULDER:
+			if tool_on:
+				_set_color(color_idx + 1)
+			else:
+				_hands_click(MOUSE_BUTTON_WHEEL_UP)
+		JOY_BUTTON_DPAD_UP:
+			if tool_on: _size_step(1)
+			else: _emote(ANIM_WAVE)
+		JOY_BUTTON_DPAD_DOWN:
+			if tool_on: _size_step(-1)
+			else: _emote(ANIM_SIT)
+		JOY_BUTTON_DPAD_LEFT:
+			if tool_on: _shape_step(1)
+			else: _emote(ANIM_DANCE)
+		JOY_BUTTON_DPAD_RIGHT:
+			if tool_on: _rotate()
+			else:
+				paint_mode = true
+				tool_on = true
 				_rebuild_ghost()
 
 
@@ -460,6 +597,7 @@ func _seated_physics() -> void:
 	velocity = Vector3.ZERO
 	fig.global_basis = vehicle.global_basis
 	_send(get_physics_process_delta_time(), vehicle.ent_id)
+	_pad_look(get_physics_process_delta_time())
 
 
 # ---------------- Hands: grab, drop, throw ----------------
