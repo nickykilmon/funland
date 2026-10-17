@@ -1,15 +1,29 @@
 extends Node3D
-# FunLand main: menu, networking (host + join), shared world state (players, funbricks), chat and saving.
-# The host is the boss: clients ask it to place/remove/paint bricks or chat, and it tells everyone.
+# FunLand main: menu, networking (host + join), shared world state (players, funbricks, physics props
+# and vehicles), dodgeball rounds, chat and saving.
+# The host is the boss: clients ask it to place/remove/paint bricks, spawn things or chat, and it tells everyone.
 
 const ONLINE_URL := "wss://funland.onrender.com/ws"
 const MAX_BRICKS := 20000
+const MAX_ENTITIES := 150
+const MAX_ENTITIES_PER_PLAYER := 30
 const BUILDS_DIR := "user://builds"
+const BRICK_CELL := 2.0     # spatial grid for overlap checks
+const CHUNK := 8.0          # bricks are drawn merged per 8 m chunk
+const ENT_SEND_RATE := 15.0
+
+const DODGE_BALLS := 12
+const DODGE_BRICKS := 30
+const BUILD_TIME := 10.0
+const ROUND_OVER_TIME := 4.0
 
 const Maps = preload("res://scripts/maps.gd")
 const Bricks = preload("res://scripts/bricks.gd")
 const Figure = preload("res://scripts/figure.gd")
+const Entities = preload("res://scripts/entities.gd")
+const Batcher = preload("res://scripts/batcher.gd")
 const PlayerScript = preload("res://scripts/player.gd")
+const EntityScript = preload("res://scripts/entity.gd")
 const MenuScript = preload("res://scripts/menu.gd")
 const HudScript = preload("res://scripts/hud.gd")
 const RelayPeer = preload("res://scripts/relay_peer.gd")
@@ -18,17 +32,33 @@ var menu: CanvasLayer
 var hud: CanvasLayer
 var world: Node3D
 var brick_root: Node3D
+var chunk_root: Node3D
 var player_root: Node3D
+var entity_root: Node3D
 var in_game := false
 
 var my_info := {}
 var players := {}       # peer id -> info dictionary
 var player_nodes := {}  # peer id -> player node
+var teams := {}         # peer id -> "red" / "blue" (dodgeball)
 var bricks := {}        # brick id -> [pos, size, color, shape, rot]
 var brick_nodes := {}   # brick id -> brick node
+var brick_cells := {}   # grid cell -> brick ids touching it
+var chunk_ids := {}     # chunk -> brick ids drawn in it
+var chunk_meshes := {}  # chunk -> merged MeshInstance3D
+var dirty_chunks := {}
 var doors_open := {}    # brick id -> true for open doors
 var history := {}       # peer id -> brick ids they placed (host only, for undo)
+var brick_owner := {}   # brick id -> peer who placed it (host only)
+var brick_count := {}   # peer id -> bricks they have placed (host only, for limits)
+var brick_hp := {}      # brick id -> hits left (dodgeball, host only)
+var brick_limit := 0    # bricks per player, 0 = unlimited
 var next_brick_id := 1
+var entities := {}      # entity id -> entity node
+var ent_spawner := {}   # entity id -> peer who spawned it (host only)
+var next_ent_id := 1
+var ent_send_timer := 0.0
+var pending_ents := []  # entities from a loaded build, spawned once the world exists
 var map_id := 0
 var plane_color := Color(0.3, 0.68, 0.25)
 var room_code := ""
@@ -36,6 +66,12 @@ var loaded_build := ""
 var list_ws: WebSocketPeer
 var list_sent := false
 var auto_join := false
+
+# dodgeball (decided by the host, copied to everyone)
+var dodge_state := "waiting"   # waiting / build / playing / roundover
+var dodge_timer := 0.0
+var score := {"red": 0, "blue": 0}
+var alive := {}                # peer id -> true while still in this round
 
 
 func _ready() -> void:
@@ -51,6 +87,22 @@ func _ready() -> void:
 	_handle_test_args()
 
 
+func is_dodgeball() -> bool:
+	return map_id == Maps.DODGEBALL
+
+
+func gravity_scale() -> float:
+	return Maps.gravity(map_id) / 9.8
+
+
+func my_id() -> int:
+	return multiplayer.get_unique_id()
+
+
+func local_player() -> Node:
+	return player_nodes.get(my_id())
+
+
 # ---------------- Starting / leaving ----------------
 
 # The relay server lives on the same website the web build is served from.
@@ -64,10 +116,11 @@ func server_url() -> String:
 	return ONLINE_URL
 
 
-func host_game(info: Dictionary, map: int, color: Color, build_name := "") -> void:
+func host_game(info: Dictionary, map: int, color: Color, build_name := "", limit := 0) -> void:
 	my_info = clean_info(info)
 	map_id = clampi(map, 0, Maps.NAMES.size() - 1)
 	plane_color = color
+	brick_limit = maxi(limit, 0)
 	loaded_build = ""
 	if build_name != "":
 		var count := _load_build(build_name)
@@ -89,12 +142,21 @@ func _on_room_ready(code: String) -> void:
 		return
 	players[1] = my_info
 	_start_world()
+	for e in pending_ents:
+		_add_entity(next_ent_id, e[0], e[1], e[2], 1, 0)
+		ent_spawner[next_ent_id - 1] = 1
+	pending_ents.clear()
 	_spawn_player(1, my_info)
 	hud.is_host = true
 	hud.set_room(code)
 	hud.add_system("Your room code is %s. Friends find it in the room list on the start screen." % code)
 	if loaded_build != "":
 		hud.add_system(loaded_build)
+	if brick_limit > 0 and not is_dodgeball():
+		hud.add_system("Brick limit: %d per player." % brick_limit)
+	brick_budget(_budget_left(1))
+	if is_dodgeball():
+		hud.add_system("Dodgeball! Pick a team. Each round starts with %d seconds to build defenses (%d bricks each)." % [BUILD_TIME, DODGE_BRICKS])
 
 
 func join_game(info: Dictionary, code: String) -> void:
@@ -131,7 +193,36 @@ func fetch_rooms() -> void:
 		list_ws = null
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	_poll_room_list()
+	for key in dirty_chunks:
+		_rebuild_chunk(key)
+	dirty_chunks.clear()
+	if in_game and is_dodgeball():
+		dodge_timer = maxf(dodge_timer - delta, 0.0)
+		if multiplayer.is_server():
+			_dodge_tick()
+		if hud:
+			hud.set_dodge(dodge_state, dodge_timer, score, _alive_count("red"), _alive_count("blue"), teams.get(my_id(), ""))
+
+
+func _physics_process(delta: float) -> void:
+	if not in_game:
+		return
+	ent_send_timer += delta
+	if ent_send_timer < 1.0 / ENT_SEND_RATE:
+		return
+	ent_send_timer = 0.0
+	var states := []
+	for e in entities.values():
+		var s: Array = e.state_to_send()
+		if not s.is_empty():
+			states.append(s)
+	if not states.is_empty():
+		sync_ents.rpc(states)
+
+
+func _poll_room_list() -> void:
 	if list_ws == null:
 		return
 	list_ws.poll()
@@ -169,6 +260,12 @@ func _start_world() -> void:
 	brick_root = Node3D.new()
 	brick_root.name = "Bricks"
 	add_child(brick_root)
+	chunk_root = Node3D.new()
+	chunk_root.name = "BrickChunks"
+	add_child(chunk_root)
+	entity_root = Node3D.new()
+	entity_root.name = "Entities"
+	add_child(entity_root)
 	player_root = Node3D.new()
 	player_root.name = "Players"
 	add_child(player_root)
@@ -177,10 +274,13 @@ func _start_world() -> void:
 	hud.chat_sent.connect(send_chat)
 	hud.leave_pressed.connect(back_to_menu)
 	hud.save_pressed.connect(_on_save_pressed)
+	hud.spawn_chosen.connect(_on_spawn_chosen)
+	hud.team_chosen.connect(request_team)
 	hud.clear_pressed.connect(func():
 		if multiplayer.is_server():
-			clear_bricks.rpc()
+			_clear_all_bricks()
 			system_msg.rpc("The host cleared all the bricks."))
+	hud.set_dodgeball(is_dodgeball())
 	for id in bricks:
 		_make_brick_node(id)
 
@@ -228,9 +328,21 @@ func _on_server_disconnected() -> void:
 
 
 func _on_peer_disconnected(id: int) -> void:
-	if multiplayer.is_server() and players.has(id):
-		system_msg.rpc("%s left the game." % players[id]["name"])
+	if multiplayer.is_server():
+		if players.has(id):
+			system_msg.rpc("%s left the game." % players[id]["name"])
+		# the host takes over anything they were holding or driving
+		for e in entities.values():
+			if e.driver_id == id:
+				set_driver.rpc(e.ent_id, 0)
+			if e.owner_id == id:
+				set_ent_owner.rpc(e.ent_id, 1)
+		alive.erase(id)
+		teams.erase(id)
+		if is_dodgeball():
+			_dodge_sync("")
 	_remove_player(id)
+	teams.erase(id)
 
 
 # Client -> host: "here's who I am". Host sends back the whole world.
@@ -245,26 +357,47 @@ func register(info: Dictionary) -> void:
 	for bid in bricks:
 		var b: Array = bricks[bid]
 		blist.append([bid, b[0], b[1], b[2], b[3], b[4], doors_open.has(bid)])
-	setup_world.rpc_id(id, map_id, plane_color, players, blist)
+	var elist := []
+	for e in entities.values():
+		elist.append([e.ent_id, e.type, e.position, e.quaternion, e.owner_id, e.driver_id])
+	var extra := {
+		"teams": teams, "limit": brick_limit, "state": dodge_state, "timer": dodge_timer,
+		"score": score, "alive": alive.keys(),
+	}
+	setup_world.rpc_id(id, map_id, plane_color, players, blist, elist, extra)
 	for other in players:
 		if other != 1 and other != id:
 			add_player.rpc_id(other, id, info)
 	_spawn_player(id, info)
 	system_msg.rpc("%s joined the game!" % info["name"])
+	brick_budget.rpc_id(id, _budget_left(id))
 
 
 @rpc("authority", "reliable")
-func setup_world(m: int, c: Color, plist: Dictionary, blist: Array) -> void:
+func setup_world(m: int, c: Color, plist: Dictionary, blist: Array, elist: Array, extra: Dictionary) -> void:
 	map_id = m
 	plane_color = c
+	brick_limit = extra.get("limit", 0)
+	teams = extra.get("teams", {})
+	dodge_state = extra.get("state", "waiting")
+	dodge_timer = extra.get("timer", 0.0)
+	score = extra.get("score", score)
+	alive.clear()
+	for a in extra.get("alive", []):
+		alive[a] = true
 	for b in blist:
 		if b[6]:
 			doors_open[b[0]] = true
 		_add_brick(b[0], b[1], b[2], b[3], b[4], b[5])
 	_start_world()
+	for e in elist:
+		_add_entity(e[0], e[1], e[2], e[3], e[4], e[5])
 	for id in plist:
 		_spawn_player(id, plist[id])
-	hud.add_system("Joined %s! Press E for the funbrick tool, T to chat." % Maps.NAMES[map_id])
+	if is_dodgeball():
+		hud.add_system("Joined Dodgeball! Pick a team to play.")
+	else:
+		hud.add_system("Joined %s! B to spawn things, E for the funbrick tool, T to chat." % Maps.NAMES[map_id])
 
 
 @rpc("authority", "reliable")
@@ -283,15 +416,16 @@ func _spawn_player(id: int, info: Dictionary) -> void:
 	p.name = "P%d" % id
 	p.peer_id = id
 	p.info = info
-	p.is_local = id == multiplayer.get_unique_id()
+	p.is_local = id == my_id()
 	p.main = self
-	var spawn := Maps.spawn_point(map_id)
+	var spawn := spawn_point_for(id)
 	if p.is_local:
 		spawn += Vector3(randf_range(-2, 2), 0, randf_range(-2, 2))
 	p.position = spawn
 	p.target_pos = spawn
 	player_root.add_child(p)
 	player_nodes[id] = p
+	p.set_team(teams.get(id, ""))
 
 
 func _remove_player(id: int) -> void:
@@ -301,25 +435,433 @@ func _remove_player(id: int) -> void:
 	players.erase(id)
 
 
-func send_transform(pos: Vector3, yaw: float, anim: int) -> void:
-	sync_tf.rpc(pos, yaw, anim)
+# Where a player should (re)appear: their team's side in dodgeball, or the bench if they're out.
+func spawn_point_for(id: int) -> Vector3:
+	if not is_dodgeball():
+		return Maps.spawn_point(map_id)
+	var team: String = teams.get(id, "")
+	if team == "" or (dodge_state == "playing" and not alive.has(id)):
+		return Maps.spawn_point(map_id)
+	return Maps.spawn_point(map_id, team)
+
+
+func send_transform(pos: Vector3, yaw: float, anim: int, vehicle: int) -> void:
+	sync_tf.rpc(pos, yaw, anim, vehicle)
 
 
 @rpc("any_peer", "unreliable_ordered")
-func sync_tf(pos: Vector3, yaw: float, anim: int) -> void:
+func sync_tf(pos: Vector3, yaw: float, anim: int, vehicle: int) -> void:
 	var p = player_nodes.get(multiplayer.get_remote_sender_id())
 	if p:
-		p.net_update(pos, yaw, anim)
+		p.net_update(pos, yaw, anim, vehicle)
+
+
+# ---------------- Physics props and vehicles ----------------
+
+func entity_respawn_point() -> Vector3:
+	return Maps.spawn_point(map_id) + Vector3(randf_range(-3, 3), 3, randf_range(-3, 3))
+
+
+func _on_spawn_chosen(type: int) -> void:
+	var p := local_player()
+	if p:
+		var spot: Array = p.spawn_spot(type)
+		request_spawn(type, spot[0], spot[1])
+
+
+func request_spawn(type: int, pos: Vector3, yaw: float) -> void:
+	if multiplayer.is_server():
+		_server_spawn(1, type, pos, yaw)
+	else:
+		req_spawn.rpc_id(1, type, pos, yaw)
+
+
+@rpc("any_peer", "reliable")
+func req_spawn(type: int, pos: Vector3, yaw: float) -> void:
+	if multiplayer.is_server():
+		_server_spawn(multiplayer.get_remote_sender_id(), type, pos, yaw)
+
+
+func _server_spawn(peer: int, type: int, pos: Vector3, yaw: float) -> void:
+	if type < 0 or type >= Entities.TYPES.size() or is_dodgeball() or pos.length() > 1000.0:
+		return
+	if entities.size() >= MAX_ENTITIES:
+		_notify(peer, "Too many things in the world (max %d). Delete some with X." % MAX_ENTITIES)
+		return
+	var mine := 0
+	for id in ent_spawner:
+		if ent_spawner[id] == peer:
+			mine += 1
+	if mine >= MAX_ENTITIES_PER_PLAYER:
+		_notify(peer, "You've spawned the max of %d things. Delete some with X." % MAX_ENTITIES_PER_PLAYER)
+		return
+	var id := next_ent_id
+	ent_spawner[id] = peer
+	spawn_ent.rpc(id, type, pos, Quaternion(Vector3.UP, yaw), peer, 0)
+
+
+@rpc("authority", "call_local", "reliable")
+func spawn_ent(id: int, type: int, pos: Vector3, rot: Quaternion, owner_peer: int, driver: int) -> void:
+	_add_entity(id, type, pos, rot, owner_peer, driver)
+
+
+func _add_entity(id: int, type: int, pos: Vector3, rot: Quaternion, owner_peer: int, driver: int) -> void:
+	next_ent_id = maxi(next_ent_id, id + 1)
+	if entities.has(id) or entity_root == null:
+		return
+	var e: RigidBody3D = EntityScript.new()
+	e.name = "E%d" % id
+	e.ent_id = id
+	e.type = type
+	e.owner_id = owner_peer
+	e.driver_id = driver
+	e.main = self
+	e.position = pos
+	e.quaternion = rot
+	entity_root.add_child(e)
+	entities[id] = e
+
+
+func request_delete(id: int) -> void:
+	if multiplayer.is_server():
+		_server_delete(id)
+	else:
+		req_delete.rpc_id(1, id)
+
+
+@rpc("any_peer", "reliable")
+func req_delete(id: int) -> void:
+	if multiplayer.is_server() and not is_dodgeball():
+		_server_delete(id)
+
+
+func _server_delete(id: int) -> void:
+	if entities.has(id):
+		delete_ent.rpc(id)
+
+
+@rpc("authority", "call_local", "reliable")
+func delete_ent(id: int) -> void:
+	ent_spawner.erase(id)
+	if entities.has(id):
+		entities[id].queue_free()
+		entities.erase(id)
+
+
+# Ask the host to let us run this thing's physics (so we can grab or push it).
+func request_own(id: int) -> void:
+	if multiplayer.is_server():
+		_server_own(1, id)
+	else:
+		req_own.rpc_id(1, id)
+
+
+@rpc("any_peer", "reliable")
+func req_own(id: int) -> void:
+	if multiplayer.is_server():
+		_server_own(multiplayer.get_remote_sender_id(), id)
+
+
+func _server_own(peer: int, id: int) -> void:
+	var e = entities.get(id)
+	if e and e.owner_id != peer and (e.driver_id == 0 or e.driver_id == peer):
+		set_ent_owner.rpc(id, peer)
+
+
+@rpc("authority", "call_local", "reliable")
+func set_ent_owner(id: int, peer: int) -> void:
+	var e = entities.get(id)
+	if e:
+		e.set_owner_id(peer)
+		var p := local_player()
+		if p:
+			p.on_owner_changed(e)
+
+
+func request_drive(id: int, enter: bool) -> void:
+	if multiplayer.is_server():
+		_server_drive(1, id, enter)
+	else:
+		req_drive.rpc_id(1, id, enter)
+
+
+@rpc("any_peer", "reliable")
+func req_drive(id: int, enter: bool) -> void:
+	if multiplayer.is_server():
+		_server_drive(multiplayer.get_remote_sender_id(), id, enter)
+
+
+func _server_drive(peer: int, id: int, enter: bool) -> void:
+	var e = entities.get(id)
+	if e == null or not Entities.is_vehicle(e.type):
+		return
+	if enter and e.driver_id == 0:
+		set_driver.rpc(id, peer)
+	elif not enter and e.driver_id == peer:
+		set_driver.rpc(id, 0)
+
+
+@rpc("authority", "call_local", "reliable")
+func set_driver(id: int, peer: int) -> void:
+	var e = entities.get(id)
+	if e == null:
+		return
+	e.driver_id = peer
+	if peer != 0:
+		e.set_owner_id(peer)
+	if peer == my_id():
+		var p := local_player()
+		if p:
+			p.enter_vehicle(e)
+
+
+@rpc("any_peer", "unreliable_ordered")
+func sync_ents(states: Array) -> void:
+	var sender := multiplayer.get_remote_sender_id()
+	for s in states:
+		var e = entities.get(s[0])
+		if e and e.owner_id == sender:
+			e.net_update(s[1], s[2], s[3])
+
+
+# ---------------- Dodgeball ----------------
+
+func _team_count(team: String) -> int:
+	var n := 0
+	for id in teams:
+		if teams[id] == team and players.has(id):
+			n += 1
+	return n
+
+
+func _alive_count(team: String) -> int:
+	var n := 0
+	for id in alive:
+		if teams.get(id, "") == team:
+			n += 1
+	return n
+
+
+func _dodge_tick() -> void:
+	var both := _team_count("red") > 0 and _team_count("blue") > 0
+	match dodge_state:
+		"waiting":
+			if both:
+				_dodge_begin_round()
+		"build":
+			if not both:
+				_dodge_set("waiting", 0.0, "Waiting for players on both teams...")
+			elif dodge_timer <= 0.0:
+				_dodge_set("playing", 0.0, "GO! Grab the balls!")
+		"playing":
+			if not both:
+				_dodge_set("waiting", 0.0, "Waiting for players on both teams...")
+				return
+			var red := _alive_count("red")
+			var blue := _alive_count("blue")
+			if red == 0 or blue == 0:
+				var winner := "blue" if red == 0 else "red"
+				score[winner] += 1
+				_dodge_set("roundover", ROUND_OVER_TIME, "%s WINS THE ROUND!" % winner.to_upper())
+		"roundover":
+			if dodge_timer <= 0.0:
+				if both:
+					_dodge_begin_round()
+				else:
+					_dodge_set("waiting", 0.0, "Waiting for players on both teams...")
+
+
+func _dodge_begin_round() -> void:
+	_clear_all_bricks()
+	for id in entities.keys():
+		delete_ent.rpc(id)
+	for i in DODGE_BALLS:
+		var z := -Maps.COURT_Z + 1.5 + i * (Maps.COURT_Z * 2 - 3.0) / (DODGE_BALLS - 1)
+		var id := next_ent_id
+		ent_spawner[id] = 1
+		spawn_ent.rpc(id, Entities.DODGEBALL_TYPE, Vector3(0, 0.6, z), Quaternion.IDENTITY, 1, 0)
+	alive.clear()
+	for id in teams:
+		if players.has(id):
+			alive[id] = true
+	_dodge_set("build", BUILD_TIME, "Build your defenses! %d bricks each (E)." % DODGE_BRICKS)
+
+
+func _dodge_set(state: String, timer: float, msg: String) -> void:
+	dodge_state = state
+	dodge_timer = timer
+	_dodge_sync(msg)
+
+
+func _dodge_sync(msg: String) -> void:
+	dodge_update.rpc(dodge_state, dodge_timer, score, alive.keys(), msg)
+
+
+@rpc("authority", "call_local", "reliable")
+func dodge_update(state: String, timer: float, new_score: Dictionary, alive_ids: Array, msg: String) -> void:
+	var was := dodge_state
+	var was_alive := alive.has(my_id())
+	dodge_state = state
+	dodge_timer = timer
+	score = new_score
+	alive.clear()
+	for a in alive_ids:
+		alive[a] = true
+	if hud and msg != "":
+		hud.big_message(msg)
+	var p := local_player()
+	if p == null:
+		return
+	if state == "build" and was != "build":
+		p.respawn()
+	elif state == "playing" and was_alive and not alive.has(my_id()):
+		p.knocked_out()
+
+
+func request_team(team: String) -> void:
+	if multiplayer.is_server():
+		_server_team(1, team)
+	else:
+		req_team.rpc_id(1, team)
+
+
+@rpc("any_peer", "reliable")
+func req_team(team: String) -> void:
+	if multiplayer.is_server():
+		_server_team(multiplayer.get_remote_sender_id(), team)
+
+
+func _server_team(peer: int, team: String) -> void:
+	if team != "red" and team != "blue" or not is_dodgeball():
+		return
+	team_set.rpc(peer, team)
+	if dodge_state == "build" or dodge_state == "waiting":
+		alive[peer] = true
+	else:
+		alive.erase(peer)
+	_dodge_sync("")
+	system_msg.rpc("%s joined the %s team." % [players[peer]["name"], team.to_upper()])
+
+
+@rpc("authority", "call_local", "reliable")
+func team_set(id: int, team: String) -> void:
+	teams[id] = team
+	var p = player_nodes.get(id)
+	if p:
+		p.set_team(team)
+		if id == my_id():
+			p.respawn()
+
+
+func can_grab_balls() -> bool:
+	if not is_dodgeball():
+		return true
+	return dodge_state == "playing" and alive.has(my_id())
+
+
+func report_ball_hit(_ent_id: int, victim: int, team: String) -> void:
+	if multiplayer.is_server():
+		_server_hit(1, victim, team)
+	else:
+		req_hit.rpc_id(1, victim, team)
+
+
+@rpc("any_peer", "reliable")
+func req_hit(victim: int, team: String) -> void:
+	if multiplayer.is_server():
+		_server_hit(multiplayer.get_remote_sender_id(), victim, team)
+
+
+func _server_hit(thrower: int, victim: int, team: String) -> void:
+	if not is_dodgeball() or dodge_state != "playing":
+		return
+	if teams.get(thrower, "") != team or teams.get(victim, "") == team or not alive.has(victim) or not alive.has(thrower):
+		return
+	alive.erase(victim)
+	_dodge_sync("")
+	system_msg.rpc("%s got hit by %s!" % [players[victim]["name"], players[thrower]["name"]])
+
+
+func report_brick_hit(brick_id: int) -> void:
+	if multiplayer.is_server():
+		_server_brick_hit(brick_id)
+	else:
+		req_brick_hit.rpc_id(1, brick_id)
+
+
+@rpc("any_peer", "reliable")
+func req_brick_hit(brick_id: int) -> void:
+	if multiplayer.is_server():
+		_server_brick_hit(brick_id)
+
+
+func _server_brick_hit(brick_id: int) -> void:
+	if not is_dodgeball() or not bricks.has(brick_id):
+		return
+	var hp: int = brick_hp.get(brick_id, 2) - 1
+	if hp <= 0:
+		brick_hp.erase(brick_id)
+		remove_brick.rpc(brick_id)
+	else:
+		brick_hp[brick_id] = hp
 
 
 # ---------------- Funbricks ----------------
 
+func _cells(box: AABB) -> Array[Vector3i]:
+	var out: Array[Vector3i] = []
+	var a := Vector3i((box.position / BRICK_CELL).floor())
+	var b := Vector3i((box.end / BRICK_CELL).floor())
+	for x in range(a.x, b.x + 1):
+		for y in range(a.y, b.y + 1):
+			for z in range(a.z, b.z + 1):
+				out.append(Vector3i(x, y, z))
+	return out
+
+
 func overlaps_any(pos: Vector3, size: Vector3i, rot: int) -> bool:
 	var a := Bricks.box_of(pos, size, rot)
-	for b in bricks.values():
-		if a.intersects(Bricks.box_of(b[0], b[1], b[4])):
-			return true
+	for cell in _cells(a):
+		for id in brick_cells.get(cell, []):
+			var b: Array = bricks[id]
+			if a.intersects(Bricks.box_of(b[0], b[1], b[4])):
+				return true
 	return false
+
+
+func limit_for_players() -> int:
+	return DODGE_BRICKS if is_dodgeball() else brick_limit
+
+
+func _budget_left(peer: int) -> int:
+	var limit := limit_for_players()
+	if limit <= 0:
+		return -1
+	return maxi(limit - int(brick_count.get(peer, 0)), 0)
+
+
+@rpc("authority", "call_local", "reliable")
+func brick_budget(left: int) -> void:
+	if hud:
+		hud.set_budget(left)
+
+
+func _send_budget(peer: int) -> void:
+	if limit_for_players() > 0 and players.has(peer):
+		brick_budget.rpc_id(peer, _budget_left(peer))
+
+
+func _notify(peer: int, text: String) -> void:
+	if peer == 1:
+		notify(text)
+	else:
+		notify.rpc_id(peer, text)
+
+
+@rpc("authority", "reliable")
+func notify(text: String) -> void:
+	if hud:
+		hud.add_system(text)
 
 
 func request_place(pos: Vector3, size: Vector3i, color: Color, shape: int, rot: int) -> void:
@@ -335,10 +877,30 @@ func req_place(pos: Vector3, size: Vector3i, color: Color, shape: int, rot: int)
 		_server_place(multiplayer.get_remote_sender_id(), pos, size, color, shape, rot)
 
 
+# Dodgeball: you can only build on your own half of the court, and only while you're still in.
+func can_build_here(peer: int, pos: Vector3, size: Vector3i, rot: int) -> bool:
+	if not is_dodgeball():
+		return true
+	var team: String = teams.get(peer, "")
+	if team == "" or not alive.has(peer) or dodge_state == "roundover":
+		return false
+	var box := Bricks.box_of(pos, size, rot)
+	if box.position.z < -Maps.COURT_Z or box.end.z > Maps.COURT_Z:
+		return false
+	if team == "red":
+		return box.end.x <= 0.0 and box.position.x >= -Maps.COURT_X
+	return box.position.x >= 0.0 and box.end.x <= Maps.COURT_X
+
+
 func _server_place(peer: int, pos: Vector3, size: Vector3i, color: Color, shape: int, rot: int) -> void:
 	if not Bricks.is_valid(shape, size, rot):
 		return
 	if pos.length() > 1000.0 or bricks.size() >= MAX_BRICKS or overlaps_any(pos, size, rot):
+		return
+	if not can_build_here(peer, pos, size, rot):
+		return
+	if _budget_left(peer) == 0:
+		_notify(peer, "You're out of bricks!")
 		return
 	var id := next_brick_id
 	next_brick_id += 1
@@ -347,7 +909,10 @@ func _server_place(peer: int, pos: Vector3, size: Vector3i, color: Color, shape:
 	history[peer].append(id)
 	if history[peer].size() > 200:
 		history[peer].pop_front()
+	brick_owner[id] = peer
+	brick_count[peer] = int(brick_count.get(peer, 0)) + 1
 	place_brick.rpc(id, pos, size, color, shape, rot)
+	_send_budget(peer)
 
 
 @rpc("authority", "call_local", "reliable")
@@ -357,7 +922,7 @@ func place_brick(id: int, pos: Vector3, size: Vector3i, color: Color, shape: int
 
 func request_remove(id: int) -> void:
 	if multiplayer.is_server():
-		_server_remove(id)
+		_server_remove(1, id)
 	else:
 		req_remove.rpc_id(1, id)
 
@@ -365,18 +930,39 @@ func request_remove(id: int) -> void:
 @rpc("any_peer", "reliable")
 func req_remove(id: int) -> void:
 	if multiplayer.is_server():
-		_server_remove(id)
+		_server_remove(multiplayer.get_remote_sender_id(), id)
 
 
-func _server_remove(id: int) -> void:
-	if bricks.has(id):
-		remove_brick.rpc(id)
+# Removing your own brick gives it back to your budget. In dodgeball you can only remove your own.
+func _server_remove(peer: int, id: int) -> void:
+	if not bricks.has(id):
+		return
+	var owner_peer: int = brick_owner.get(id, 0)
+	if is_dodgeball() and owner_peer != peer:
+		return
+	if owner_peer == peer:
+		brick_count[peer] = maxi(int(brick_count.get(peer, 0)) - 1, 0)
+	remove_brick.rpc(id)
+	_send_budget(peer)
 
 
 @rpc("authority", "call_local", "reliable")
 func remove_brick(id: int) -> void:
+	if not bricks.has(id):
+		return
+	var b: Array = bricks[id]
+	for cell in _cells(Bricks.box_of(b[0], b[1], b[4])):
+		if brick_cells.has(cell):
+			brick_cells[cell].erase(id)
+			if brick_cells[cell].is_empty():
+				brick_cells.erase(cell)
+	var key := _chunk_of(b[0])
+	if chunk_ids.has(key):
+		chunk_ids[key].erase(id)
+		dirty_chunks[key] = true
 	bricks.erase(id)
 	doors_open.erase(id)
+	brick_owner.erase(id)
 	if brick_nodes.has(id):
 		brick_nodes[id].queue_free()
 		brick_nodes.erase(id)
@@ -400,7 +986,7 @@ func _server_undo(peer: int) -> void:
 	while list.size() > 0:
 		var id: int = list.pop_back()
 		if bricks.has(id):
-			remove_brick.rpc(id)
+			_server_remove(peer, id)
 			return
 
 
@@ -461,14 +1047,29 @@ func set_door(id: int, open: bool) -> void:
 		Bricks.set_door_open(brick_nodes[id], open)
 
 
+func _clear_all_bricks() -> void:
+	brick_count.clear()
+	brick_hp.clear()
+	clear_bricks.rpc()
+	for peer in players:
+		_send_budget(peer)
+
+
 @rpc("authority", "call_local", "reliable")
 func clear_bricks() -> void:
 	for id in brick_nodes:
 		brick_nodes[id].queue_free()
+	for key in chunk_meshes:
+		chunk_meshes[key].queue_free()
 	bricks.clear()
 	brick_nodes.clear()
+	brick_cells.clear()
+	chunk_ids.clear()
+	chunk_meshes.clear()
+	dirty_chunks.clear()
 	doors_open.clear()
 	history.clear()
+	brick_owner.clear()
 
 
 func _add_brick(id: int, pos: Vector3, size: Vector3i, color: Color, shape: int, rot: int) -> void:
@@ -476,10 +1077,19 @@ func _add_brick(id: int, pos: Vector3, size: Vector3i, color: Color, shape: int,
 		return
 	bricks[id] = [pos, size, color, shape, rot]
 	next_brick_id = maxi(next_brick_id, id + 1)
+	for cell in _cells(Bricks.box_of(pos, size, rot)):
+		if not brick_cells.has(cell):
+			brick_cells[cell] = []
+		brick_cells[cell].append(id)
 	if brick_root:
 		_make_brick_node(id)
 
 
+func _chunk_of(pos: Vector3) -> Vector3i:
+	return Vector3i((pos / CHUNK).floor())
+
+
+# Each brick keeps its collision, but its plain parts get drawn as part of one merged mesh per chunk.
 func _make_brick_node(id: int) -> void:
 	if brick_nodes.has(id):
 		return
@@ -493,6 +1103,38 @@ func _make_brick_node(id: int) -> void:
 		panel.set_meta("brick_id", id)
 	brick_root.add_child(node)
 	brick_nodes[id] = node
+	if b[3] != Bricks.DOOR:
+		for c in node.get_children():
+			if c is MeshInstance3D and Batcher.can_merge(c):
+				c.visible = false
+		var key := _chunk_of(b[0])
+		if not chunk_ids.has(key):
+			chunk_ids[key] = []
+		if not chunk_ids[key].has(id):
+			chunk_ids[key].append(id)
+		dirty_chunks[key] = true
+
+
+func _rebuild_chunk(key: Vector3i) -> void:
+	var group := Batcher.Group.new()
+	for id in chunk_ids.get(key, []):
+		var node: Node3D = brick_nodes.get(id)
+		if node == null:
+			continue
+		for c in node.get_children():
+			if c is MeshInstance3D and not c.visible:
+				var mi := c as MeshInstance3D
+				group.add(mi.mesh, node.transform * mi.transform, (mi.material_override as StandardMaterial3D).albedo_color)
+	if chunk_meshes.has(key):
+		chunk_meshes[key].queue_free()
+		chunk_meshes.erase(key)
+	if group.verts.is_empty():
+		chunk_ids.erase(key)
+		return
+	var mi := MeshInstance3D.new()
+	mi.mesh = group.to_mesh(Batcher.material())
+	chunk_root.add_child(mi)
+	chunk_meshes[key] = mi
 
 
 # ---------------- Saving builds (host only) ----------------
@@ -507,7 +1149,7 @@ func _on_save_pressed(build_name: String) -> void:
 		hud.set_pause_status("Type a name for your build first.")
 		return
 	var err := save_build(safe)
-	hud.set_pause_status("Saved \"%s\" (%d bricks)!" % [safe, bricks.size()] if err == OK else "Couldn't save (error %d)." % err)
+	hud.set_pause_status("Saved \"%s\" (%d bricks, %d things)!" % [safe, bricks.size(), entities.size()] if err == OK else "Couldn't save (error %d)." % err)
 
 
 func save_build(build_name: String) -> int:
@@ -517,7 +1159,12 @@ func save_build(build_name: String) -> int:
 		var p: Vector3 = b[0]
 		var s: Vector3i = b[1]
 		list.append([p.x, p.y, p.z, s.x, s.y, s.z, (b[2] as Color).to_html(false), b[3], b[4], doors_open.has(id)])
-	var data := {"version": 1, "map": map_id, "ground": plane_color.to_html(false), "bricks": list}
+	var ents := []
+	for e in entities.values():
+		var p: Vector3 = e.position
+		var q: Quaternion = e.quaternion
+		ents.append([e.type, p.x, p.y, p.z, q.x, q.y, q.z, q.w])
+	var data := {"version": 2, "map": map_id, "ground": plane_color.to_html(false), "bricks": list, "ents": ents}
 	DirAccess.make_dir_recursive_absolute(BUILDS_DIR)
 	var f := FileAccess.open("%s/%s.json" % [BUILDS_DIR, build_name], FileAccess.WRITE)
 	if f == null:
@@ -548,8 +1195,13 @@ func _load_build(build_name: String) -> int:
 		var id := next_brick_id
 		if b[9]:
 			doors_open[id] = true
+		brick_owner[id] = 1
 		_add_brick(id, Vector3(b[0], b[1], b[2]), size, Color.from_string(str(b[6]), Color.WHITE), shape, rot)
 		count += 1
+	pending_ents.clear()
+	for e in data.get("ents", []):
+		if e is Array and e.size() >= 8 and int(e[0]) >= 0 and int(e[0]) < Entities.TYPES.size():
+			pending_ents.append([int(e[0]), Vector3(e[1], e[2], e[3]), Quaternion(e[4], e[5], e[6], e[7]).normalized()])
 	return count
 
 
@@ -610,13 +1262,73 @@ func _handle_test_args() -> void:
 						request_door(id)
 				request_paint(bricks.keys()[0], Color.BLUE)
 				request_undo())
+		elif a == "autospawn":
+			get_tree().create_timer(2.0).timeout.connect(func():
+				for t in Entities.TYPES.size():
+					request_spawn(t, Vector3(-30 + (t % 7) * 8.0, 2.0, -15.0 - (t / 7) * 10.0), 0.0))
+		elif a.begins_with("autodrive="):
+			# drive the vehicle of this type forward for a few seconds (W held)
+			var vt := int(a.get_slice("=", 1))
+			get_tree().create_timer(4.0).timeout.connect(func():
+				for e in entities.values():
+					if e.type == vt:
+						request_drive(e.ent_id, true)
+						print("TEST start ", Entities.TYPES[vt]["name"], " at ", e.position)
+						Input.action_press("ui_up")
+						var ev := InputEventKey.new()
+						ev.physical_keycode = KEY_W
+						ev.pressed = true
+						if vt != 18:
+							Input.parse_input_event(ev)
+						if vt == 17:
+							var sp := InputEventKey.new()
+							sp.physical_keycode = KEY_SPACE
+							sp.pressed = true
+							Input.parse_input_event(sp)
+						if vt == 18:
+							var sh := InputEventKey.new()
+							sh.physical_keycode = KEY_SHIFT
+							sh.pressed = true
+							Input.parse_input_event(sh)
+						get_tree().create_timer(5.0).timeout.connect(func():
+							print("TEST after 5s ", Entities.TYPES[vt]["name"], " at ", e.position, " speed ", e.linear_velocity.length(), " up ", e.global_basis.y))
+						break)
+		elif a == "autograb":
+			get_tree().create_timer(5.0).timeout.connect(func():
+				var e = entities.get(1)
+				print("TEST grab ", e.ent_id, " owner before=", e.owner_id)
+				request_own(1)
+				await get_tree().create_timer(1.0).timeout
+				print("TEST owner after=", e.owner_id, " mine=", e.is_mine())
+				e.linear_velocity = Vector3(0, 12, 0)
+				await get_tree().create_timer(0.5).timeout
+				print("TEST joiner sees y=", e.position.y))
+		elif a == "autohit":
+			get_tree().create_timer(17.0).timeout.connect(func():
+				print("TEST client state before hit: ", dodge_state, " alive=", alive.keys(), " balls=", entities.size(), " budget=", hud.budget)
+				request_place(Vector3(10.2, 0.24 + 0.06, 3.2), Vector3i(2, 3, 4), Color.BLUE, 0, 0)
+				report_ball_hit(0, 1, "blue"))
+		elif a == "autoteam":
+			get_tree().create_timer(2.5).timeout.connect(func(): request_team("red" if multiplayer.is_server() else "blue"))
 		elif a.begins_with("autosave="):
 			get_tree().create_timer(5.0).timeout.connect(func(): print("TEST save=", save_build(a.get_slice("=", 1))))
 		elif a.begins_with("autoquit="):
 			get_tree().create_timer(float(a.get_slice("=", 1))).timeout.connect(func():
-				print("TEST players=", players.keys(), " nodes=", player_nodes.size(), " bricks=", bricks.size(), " doors_open=", doors_open.keys())
-				for id in bricks:
-					print("TEST brick ", id, " shape=", bricks[id][3], " color=", bricks[id][2].to_html(false))
+				print("TEST players=", players.keys(), " nodes=", player_nodes.size(), " bricks=", bricks.size(), " doors_open=", doors_open.keys(), " ents=", entities.size(), " chunks=", chunk_meshes.size())
+				if is_dodgeball():
+					print("TEST dodge state=", dodge_state, " teams=", teams, " alive=", alive.keys(), " score=", score)
+				var sleeping := 0
+				for e in entities.values():
+					if e.sleeping:
+						sleeping += 1
+				print("TEST ents sleeping=", sleeping)
+				if entities.has(1):
+					print("TEST ent1 owner=", entities[1].owner_id, " y=", entities[1].position.y)
+				for e in entities.values():
+					if Entities.is_vehicle(e.type):
+						print("TEST rest ", Entities.TYPES[e.type]["name"], " y=", snappedf(e.position.y, 0.01), " up=", e.global_basis.y.snapped(Vector3.ONE * 0.01))
+				if world:
+					print("TEST map meshes drawn=", world.find_children("*", "MeshInstance3D", true, false).size())
 				if hud:
 					print("TEST chat: ", hud.log_label.get_parsed_text().replace("\n", " | "))
 				get_tree().quit())

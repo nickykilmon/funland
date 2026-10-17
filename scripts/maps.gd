@@ -3,11 +3,18 @@ extends RefCounted
 # every player in the room gets exactly the same map.
 
 const Figure = preload("res://scripts/figure.gd")
+const Batcher = preload("res://scripts/batcher.gd")
 
 const NAMES := [
 	"Plane", "House", "City", "Forest", "World", "Desert", "Snow", "Moon",
-	"Castle", "Candy Land", "Volcano", "Sky Islands", "Stadium",
+	"Castle", "Candy Land", "Volcano", "Sky Islands", "Stadium", "Dodgeball",
 ]
+const DODGEBALL := 13
+
+# Dodgeball court: x runs from red's end (-) to blue's end (+), the bench is behind the glass at +z.
+const COURT_X := 20.0
+const COURT_Z := 12.0
+const BENCH := Vector3(0, 0.5, 15.0)
 
 const TRUNK := Color(0.42, 0.26, 0.12)
 const LEAF := Color(0.18, 0.55, 0.18)
@@ -17,7 +24,12 @@ const PINE := Color(0.1, 0.4, 0.2)
 static var _stud_tex: Texture2D
 
 
-static func spawn_point(id: int) -> Vector3:
+static func spawn_point(id: int, team := "") -> Vector3:
+	if id == DODGEBALL:
+		match team:
+			"red": return Vector3(-COURT_X + 3.0, 0.5, 0)
+			"blue": return Vector3(COURT_X - 3.0, 0.5, 0)
+			_: return BENCH
 	match id:
 		1: return Vector3(0, 0.5, 4)
 		8: return Vector3(0, 0.5, 12)
@@ -47,6 +59,8 @@ static func build(id: int, ground: Color) -> Node3D:
 		10: _volcano(root)
 		11: _sky_islands(root)
 		12: _stadium(root)
+		13: _dodgeball(root)
+	Batcher.merge(root)
 	return root
 
 
@@ -821,3 +835,64 @@ static func _stadium(root: Node3D) -> void:
 			lamp.material_override = Figure.glow_mat(Color(1, 1, 0.9))
 			lamp.rotation.y = atan2(p.x, p.z)
 	ball(root, 0.8, Vector3(0, 0.8, -6), Color.WHITE)
+
+
+static func _dodgeball(root: Node3D) -> void:
+	_env(root, Color(0.3, 0.5, 0.9), Color(0.8, 0.85, 0.95))
+	_ground(root, Color(0.35, 0.55, 0.3), 140.0)
+	var wood := Color(0.82, 0.62, 0.38)
+	var red := Color(0.85, 0.15, 0.15)
+	var blue := Color(0.15, 0.35, 0.85)
+	var wall := Color(0.9, 0.9, 0.92)
+	# court floor, halves tinted by team
+	solid(root, Vector3(COURT_X * 2, 0.06, COURT_Z * 2), Vector3(0, 0.03, 0), wood, stud_mat(wood))
+	Figure.box(root, Vector3(COURT_X - 0.2, 0.01, COURT_Z * 2 - 0.4), Vector3(-COURT_X * 0.5, 0.065, 0), wood.lerp(red, 0.15))
+	Figure.box(root, Vector3(COURT_X - 0.2, 0.01, COURT_Z * 2 - 0.4), Vector3(COURT_X * 0.5, 0.065, 0), wood.lerp(blue, 0.15))
+	Figure.box(root, Vector3(0.3, 0.012, COURT_Z * 2), Vector3(0, 0.066, 0), Color.WHITE)
+	var ring := MeshInstance3D.new()
+	var tm := TorusMesh.new()
+	tm.inner_radius = 3.0
+	tm.outer_radius = 3.25
+	ring.mesh = tm
+	ring.scale = Vector3(1, 0.02, 1)
+	ring.position.y = 0.065
+	ring.material_override = Figure.mat(Color.WHITE)
+	root.add_child(ring)
+	# walls (the bench side is glass so people who are out can watch)
+	var h := 4.0
+	solid(root, Vector3(0.6, h, COURT_Z * 2 + 1.2), Vector3(-COURT_X - 0.3, h * 0.5, 0), red)
+	solid(root, Vector3(0.6, h, COURT_Z * 2 + 1.2), Vector3(COURT_X + 0.3, h * 0.5, 0), blue)
+	solid(root, Vector3(COURT_X * 2, h, 0.6), Vector3(0, h * 0.5, -COURT_Z - 0.3), wall)
+	var glass := solid(root, Vector3(COURT_X * 2, h, 0.2), Vector3(0, h * 0.5, COURT_Z + 0.1), Color(0.7, 0.85, 1.0))
+	(glass.get_child(1) as MeshInstance3D).material_override = Figure.glass_mat(Color(0.7, 0.85, 1.0, 0.25))
+	Figure.box(root, Vector3(COURT_X * 2, 0.2, 0.3), Vector3(0, h, COURT_Z + 0.1), wall)
+	# invisible line down the middle that stops players (balls fly through it)
+	var divider := StaticBody3D.new()
+	divider.collision_layer = 8
+	divider.collision_mask = 0
+	var dcs := CollisionShape3D.new()
+	var dbs := BoxShape3D.new()
+	dbs.size = Vector3(0.2, 12, COURT_Z * 2)
+	dcs.shape = dbs
+	divider.add_child(dcs)
+	divider.position = Vector3(0, 6, 0)
+	root.add_child(divider)
+	# bench area behind the glass, with bleachers
+	solid(root, Vector3(COURT_X * 2, 0.06, 7), Vector3(0, 0.03, COURT_Z + 3.7), Color(0.5, 0.5, 0.52))
+	for row in 4:
+		solid(root, Vector3(COURT_X * 2 - 4, 0.45 * (row + 1), 1.0), Vector3(0, 0.225 * (row + 1), COURT_Z + 4.2 + row), Color(0.6, 0.6, 0.65).darkened(row * 0.05))
+	solid(root, Vector3(COURT_X * 2 + 1.2, h, 0.6), Vector3(0, h * 0.5, COURT_Z + 7.5), wall)
+	solid(root, Vector3(0.6, h, 7), Vector3(-COURT_X - 0.3, h * 0.5, COURT_Z + 3.7), wall)
+	solid(root, Vector3(0.6, h, 7), Vector3(COURT_X + 0.3, h * 0.5, COURT_Z + 3.7), wall)
+	# team banners
+	for side in [-1, 1]:
+		var c := red if side < 0 else blue
+		Figure.box(root, Vector3(0.1, 2.0, 6.0), Vector3((COURT_X - 0.05) * side, 2.4, 0), c.lightened(0.2))
+		Figure.box(root, Vector3(4, 0.08, 3), Vector3((COURT_X - 3) * side, 0.07, 0), c.lightened(0.3))
+	# lights
+	for x in [-12.0, 0.0, 12.0]:
+		var lamp := OmniLight3D.new()
+		lamp.position = Vector3(x, 7, 0)
+		lamp.omni_range = 18
+		lamp.light_energy = 0.8
+		root.add_child(lamp)

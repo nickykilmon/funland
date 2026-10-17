@@ -1,10 +1,11 @@
 extends CharacterBody3D
-# A funfig player. The local one reads input and owns the camera + brick tool;
-# remote ones just glide toward the positions the network sends.
+# A funfig player. The local one reads input and owns the camera, hands (grab/throw),
+# brick tool and driving; remote ones just glide toward the positions the network sends.
 
 const Figure = preload("res://scripts/figure.gd")
 const Bricks = preload("res://scripts/bricks.gd")
 const Maps = preload("res://scripts/maps.gd")
+const Entities = preload("res://scripts/entities.gd")
 
 const WALK_SPEED := 5.0
 const RUN_SPEED := 8.5
@@ -12,6 +13,7 @@ const JUMP_SPEED := 6.8
 const MOUSE_SENS := 0.0025
 const REACH := 9.0
 const THIRD_PERSON_DIST := 3.5
+const TEAM_COLORS := {"red": Color(1.0, 0.35, 0.35), "blue": Color(0.45, 0.65, 1.0)}
 
 enum { ANIM_NONE, ANIM_WAVE, ANIM_DANCE, ANIM_SIT }
 
@@ -19,11 +21,13 @@ var peer_id := 1
 var info := {}
 var is_local := false
 var main: Node
+var team := ""
 
 var arm: SpringArm3D
 var cam: Camera3D
 var ray: RayCast3D
 var fig: Node3D
+var tag: Label3D
 var gravity := 18.0
 var pitch := 0.0
 var third_person := false
@@ -34,6 +38,16 @@ var target_pos := Vector3.ZERO
 var target_yaw := 0.0
 var send_timer := 0.0
 var last_pos := Vector3.ZERO
+
+# hands: grabbing and throwing physics props
+var held: RigidBody3D
+var hold_dist := 2.5
+var pending_grab := -1
+var push_asked := {}   # entity id -> time we last asked to push it
+
+# driving
+var vehicle: RigidBody3D
+var remote_vehicle := -1
 
 # funbrick tool
 var tool_on := false
@@ -65,7 +79,7 @@ func _ready() -> void:
 	gravity = Maps.gravity(main.map_id)
 	if is_local:
 		collision_layer = 2
-		collision_mask = 1 | 4
+		collision_mask = 1 | 4 | 8 | 16
 		Figure.set_layers(fig, 2)
 		arm = SpringArm3D.new()
 		arm.position.y = 1.62
@@ -86,7 +100,7 @@ func _ready() -> void:
 	else:
 		collision_layer = 4
 		collision_mask = 0
-		var tag := Label3D.new()
+		tag = Label3D.new()
 		tag.text = str(info.get("name", "Player"))
 		tag.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 		tag.position.y = 2.45
@@ -94,6 +108,7 @@ func _ready() -> void:
 		tag.outline_size = 10
 		tag.pixel_size = 0.006
 		add_child(tag)
+	set_team(team)
 
 
 func _exit_tree() -> void:
@@ -101,17 +116,28 @@ func _exit_tree() -> void:
 		ghost.queue_free()
 
 
+func set_team(t: String) -> void:
+	team = t
+	if tag:
+		tag.modulate = TEAM_COLORS.get(t, Color.WHITE)
+		tag.text = ("[%s] " % t.to_upper() if t != "" else "") + str(info.get("name", "Player"))
+
+
 func _set_view(third: bool) -> void:
 	third_person = third
-	arm.spring_length = THIRD_PERSON_DIST if third else 0.0
-	arm.position.x = 0.45 if third else 0.0
-	cam.cull_mask = 0xFFFFF if third else 0xFFFFF & ~2
-	ray.target_position = Vector3(0, 0, -(REACH + (THIRD_PERSON_DIST if third else 0.0)))
+	var dist := THIRD_PERSON_DIST if third else 0.0
+	if vehicle:
+		dist = vehicle.cfg["cam"]
+	arm.spring_length = dist
+	arm.position.x = 0.45 if third and not vehicle else 0.0
+	cam.cull_mask = 0xFFFFF if (third or vehicle) else 0xFFFFF & ~2
+	ray.target_position = Vector3(0, 0, -(REACH + dist))
 
 
-func net_update(pos: Vector3, yaw: float, a: int) -> void:
+func net_update(pos: Vector3, yaw: float, a: int, veh: int) -> void:
 	target_pos = pos
 	target_yaw = yaw
+	remote_vehicle = veh
 	if a != anim:
 		anim = a
 		anim_time = 0.0
@@ -119,15 +145,39 @@ func net_update(pos: Vector3, yaw: float, a: int) -> void:
 		position = pos
 
 
+func respawn() -> void:
+	if vehicle:
+		exit_vehicle()
+	_drop()
+	position = main.spawn_point_for(peer_id) + Vector3(randf_range(-2, 2), 0, randf_range(-2, 2))
+	velocity = Vector3.ZERO
+
+
+func knocked_out() -> void:
+	respawn()
+	if main.hud:
+		main.hud.big_message("You're out! Watch from the bench until the next round.")
+
+
 func _physics_process(delta: float) -> void:
 	if is_local:
-		_local_physics(delta)
+		if vehicle:
+			_seated_physics()
+		else:
+			_local_physics(delta)
 	else:
-		var t := 1.0 - exp(-14.0 * delta)
-		position = position.lerp(target_pos, t)
-		rotation.y = lerp_angle(rotation.y, target_yaw, t)
+		var e = main.entities.get(remote_vehicle) if remote_vehicle >= 0 else null
+		if e:
+			position = e.global_transform * (e.cfg["seat"] as Vector3)
+			fig.global_basis = e.global_basis
+		else:
+			var t := 1.0 - exp(-14.0 * delta)
+			position = position.lerp(target_pos, t)
+			rotation.y = lerp_angle(rotation.y, target_yaw, t)
 	var speed := Vector2(position.x - last_pos.x, position.z - last_pos.z).length() / maxf(delta, 0.0001)
 	last_pos = position
+	if (vehicle or remote_vehicle >= 0):
+		speed = 0.0
 	_animate(delta, speed)
 
 
@@ -153,12 +203,11 @@ func _local_physics(delta: float) -> void:
 	velocity.x = move_toward(velocity.x, dir.x * speed, accel * delta)
 	velocity.z = move_toward(velocity.z, dir.z * speed, accel * delta)
 	move_and_slide()
+	_push_props()
 	if position.y < -30.0 or _in_kill_zone():
 		respawn()
-	send_timer += delta
-	if send_timer >= 0.05:
-		send_timer = 0.0
-		main.send_transform(position, rotation.y, anim)
+	_send(delta, -1)
+	_update_held()
 	_update_ghost()
 	# hold the mouse button to keep placing / painting
 	if tool_on and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
@@ -171,16 +220,35 @@ func _local_physics(delta: float) -> void:
 				_place()
 
 
+func _send(delta: float, veh: int) -> void:
+	send_timer += delta
+	if send_timer >= 0.05:
+		send_timer = 0.0
+		main.send_transform(position, rotation.y, anim, veh)
+
+
+# Walking into props shoves them (asking the host for control first if someone else runs them).
+func _push_props() -> void:
+	for i in get_slide_collision_count():
+		var c := get_slide_collision(i)
+		var body = c.get_collider()
+		if not (body is RigidBody3D and "ent_id" in body):
+			continue
+		if body.is_mine():
+			body.sleeping = false
+			body.apply_central_impulse(-c.get_normal() * minf(body.mass, 40.0) * 0.2)
+		elif body.driver_id == 0:
+			var now := Time.get_ticks_msec()
+			if now - int(push_asked.get(body.ent_id, 0)) > 600:
+				push_asked[body.ent_id] = now
+				main.request_own(body.ent_id)
+
+
 func _in_kill_zone() -> bool:
 	for area in get_tree().get_nodes_in_group("kill_zone"):
 		if (area as Area3D).overlaps_body(self):
 			return true
 	return false
-
-
-func respawn() -> void:
-	position = Maps.spawn_point(main.map_id) + Vector3(randf_range(-2, 2), 0, randf_range(-2, 2))
-	velocity = Vector3.ZERO
 
 
 func _animate(delta: float, speed: float) -> void:
@@ -196,7 +264,8 @@ func _animate(delta: float, speed: float) -> void:
 	var arm_r_z := 0.0
 	var body_y := 0.0
 	var body_yaw := 0.0
-	match anim:
+	var seated := vehicle != null or remote_vehicle >= 0
+	match ANIM_SIT if seated else anim:
 		ANIM_WAVE:
 			arms.y = 2.8
 			arm_r_z = 0.3 + sin(anim_time * 12.0) * 0.35
@@ -208,8 +277,10 @@ func _animate(delta: float, speed: float) -> void:
 			body_yaw = sin(anim_time * 4.0) * 0.5
 		ANIM_SIT:
 			legs = Vector2(PI * 0.5, PI * 0.5)
-			arms = Vector2(0.5, 0.5)
-			body_y = -0.55
+			arms = Vector2(0.5, 0.5) if not seated else Vector2(1.2, 1.2)
+			body_y = -0.55 if not seated else 0.0
+	if held and is_local:
+		arms = Vector2(1.4, 1.4)
 	_swing("LegL", legs.x)
 	_swing("LegR", legs.y)
 	_swing("ArmL", arms.x)
@@ -218,7 +289,8 @@ func _animate(delta: float, speed: float) -> void:
 	if arm_r:
 		arm_r.rotation.z = lerpf(arm_r.rotation.z, arm_r_z, 0.3)
 	fig.position.y = lerpf(fig.position.y, body_y, 0.3)
-	fig.rotation.y = lerpf(fig.rotation.y, body_yaw, 0.2)
+	if not seated:
+		fig.rotation = Vector3(lerpf(fig.rotation.x, 0.0, 0.3), lerpf(fig.rotation.y, body_yaw, 0.2), lerpf(fig.rotation.z, 0.0, 0.3))
 	var prop := fig.get_node_or_null("Propeller") as Node3D
 	if prop:
 		prop.rotate_y(delta * (6.0 + speed * 3.0))
@@ -248,68 +320,75 @@ func _unhandled_input(event: InputEvent) -> void:
 			if mb.button_index == MOUSE_BUTTON_LEFT:
 				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 			return
-		if not tool_on:
+		if vehicle:
 			return
-		match mb.button_index:
-			MOUSE_BUTTON_LEFT:
-				hold_timer = 0.35
-				last_place_pos = Vector3.INF
-				last_painted = -1
-				if paint_mode:
-					_paint()
-				else:
-					_place()
-			MOUSE_BUTTON_RIGHT: _remove()
-			MOUSE_BUTTON_MIDDLE: _copy()
-			MOUSE_BUTTON_WHEEL_UP: _set_color(color_idx - 1)
-			MOUSE_BUTTON_WHEEL_DOWN: _set_color(color_idx + 1)
+		if tool_on:
+			_tool_click(mb.button_index)
+		else:
+			_hands_click(mb.button_index)
 	elif event is InputEventKey and event.pressed and not event.echo:
-		var ke := event as InputEventKey
-		var key := ke.physical_keycode
-		match key:
-			KEY_ESCAPE:
-				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-			KEY_E:
-				tool_on = not tool_on
-				_rebuild_ghost()
-			KEY_Q:
+		_key(event as InputEventKey)
+
+
+func _key(ke: InputEventKey) -> void:
+	var key := ke.physical_keycode
+	match key:
+		KEY_ESCAPE:
+			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		KEY_T, KEY_ENTER, KEY_KP_ENTER:
+			get_viewport().set_input_as_handled()
+			main.hud.open_chat()
+		KEY_V:
+			_set_view(not third_person)
+		KEY_F:
+			_use()
+	if vehicle:
+		if key == KEY_R and vehicle.is_mine():
+			vehicle.flip_upright()
+		return
+	match key:
+		KEY_E:
+			tool_on = not tool_on
+			_drop()
+			_rebuild_ghost()
+		KEY_B:
+			if not main.is_dodgeball():
+				main.hud.toggle_spawn_menu()
+		KEY_Q:
+			if tool_on:
 				shape = posmod(shape + (-1 if ke.shift_pressed else 1), Bricks.SHAPES.size())
 				_rebuild_ghost()
-			KEY_R:
+		KEY_R:
+			if tool_on:
 				rot = (rot + 1) % 4
 				_rebuild_ghost()
-			KEY_P:
-				paint_mode = not paint_mode
-				if not tool_on:
-					tool_on = true
-				_rebuild_ghost()
-			KEY_Z:
-				if ke.ctrl_pressed:
-					main.request_undo()
-				else:
-					_set_color(color_idx - 1)
-			KEY_U:
+		KEY_P:
+			paint_mode = not paint_mode
+			tool_on = true
+			_rebuild_ghost()
+		KEY_Z:
+			if ke.ctrl_pressed:
 				main.request_undo()
-			KEY_X:
+			elif tool_on:
+				_set_color(color_idx - 1)
+		KEY_U:
+			main.request_undo()
+		KEY_X:
+			if tool_on:
 				_set_color(color_idx + 1)
-			KEY_F:
-				_use_door()
-			KEY_G:
-				_emote(ANIM_WAVE)
-			KEY_H:
-				_emote(ANIM_DANCE)
-			KEY_C:
-				_emote(ANIM_SIT)
-			KEY_V:
-				_set_view(not third_person)
-			KEY_T, KEY_ENTER, KEY_KP_ENTER:
-				get_viewport().set_input_as_handled()
-				main.hud.open_chat()
-			_:
-				var sizes: Array = Bricks.SHAPES[shape]["sizes"]
-				if key >= KEY_1 and key <= KEY_9 and key - KEY_1 < sizes.size():
-					size_idx[shape] = key - KEY_1
-					_rebuild_ghost()
+			else:
+				_delete_looked_at()
+		KEY_G:
+			_emote(ANIM_WAVE)
+		KEY_H:
+			_emote(ANIM_DANCE)
+		KEY_C:
+			_emote(ANIM_SIT)
+		_:
+			var sizes: Array = Bricks.SHAPES[shape]["sizes"]
+			if tool_on and key >= KEY_1 and key <= KEY_9 and key - KEY_1 < sizes.size():
+				size_idx[shape] = key - KEY_1
+				_rebuild_ghost()
 
 
 func _emote(a: int) -> void:
@@ -320,6 +399,190 @@ func _emote(a: int) -> void:
 		velocity.z = 0
 
 
+# F: open a door you're looking at, otherwise get in / out of the nearest vehicle.
+func _use() -> void:
+	if vehicle:
+		exit_vehicle()
+		return
+	var id := _hit_brick_id()
+	if id >= 0 and main.bricks.has(id) and main.bricks[id][3] == Bricks.DOOR:
+		main.request_door(id)
+		return
+	var best: RigidBody3D = null
+	var best_d := 4.5
+	for e in main.entities.values():
+		if Entities.is_vehicle(e.type) and e.driver_id == 0:
+			var d: float = e.global_position.distance_to(global_position)
+			if d < best_d:
+				best_d = d
+				best = e
+	if best:
+		main.request_drive(best.ent_id, true)
+
+
+# ---------------- Driving ----------------
+
+func enter_vehicle(e: RigidBody3D) -> void:
+	_drop()
+	tool_on = false
+	_rebuild_ghost()
+	vehicle = e
+	collision_layer = 0
+	collision_mask = 0
+	arm.add_excluded_object(e.get_rid())
+	anim = ANIM_SIT
+	_set_view(third_person)
+	if main.hud:
+		main.hud.set_driving(e.cfg["kind"])
+
+
+func exit_vehicle() -> void:
+	var e := vehicle
+	vehicle = null
+	if is_instance_valid(e):
+		main.request_drive(e.ent_id, false)
+		arm.remove_excluded_object(e.get_rid())
+		global_position = e.global_position + e.global_basis.x * -2.5 + Vector3.UP * 1.5
+	collision_layer = 2
+	collision_mask = 1 | 4 | 8 | 16
+	anim = ANIM_NONE
+	velocity = Vector3.ZERO
+	_set_view(third_person)
+	if main.hud:
+		main.hud.set_driving(-1)
+
+
+func _seated_physics() -> void:
+	if not is_instance_valid(vehicle) or vehicle.driver_id != main.my_id():
+		exit_vehicle()
+		return
+	global_position = vehicle.global_transform * (vehicle.cfg["seat"] as Vector3)
+	velocity = Vector3.ZERO
+	fig.global_basis = vehicle.global_basis
+	_send(get_physics_process_delta_time(), vehicle.ent_id)
+
+
+# ---------------- Hands: grab, drop, throw ----------------
+
+func _look_entity() -> RigidBody3D:
+	var from := cam.global_position
+	var to := from - cam.global_basis.z * (REACH + arm.spring_length)
+	var q := PhysicsRayQueryParameters3D.create(from, to, 1 | 16, [get_rid()])
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	if hit.is_empty():
+		return null
+	var body = hit["collider"]
+	return body if body is RigidBody3D and "ent_id" in body else null
+
+
+func _hands_click(button: int) -> void:
+	match button:
+		MOUSE_BUTTON_LEFT:
+			if held:
+				_drop()
+			else:
+				_try_grab()
+		MOUSE_BUTTON_RIGHT:
+			if held:
+				_throw()
+		MOUSE_BUTTON_WHEEL_UP:
+			hold_dist = minf(hold_dist + 0.5, 10.0)
+		MOUSE_BUTTON_WHEEL_DOWN:
+			hold_dist = maxf(hold_dist - 0.5, 1.2)
+
+
+func _try_grab() -> void:
+	var e := _look_entity()
+	if e == null or e.driver_id != 0:
+		return
+	if main.is_dodgeball() and not main.can_grab_balls():
+		if main.hud:
+			main.hud.big_message("You can grab balls once the round starts!" if main.alive.has(peer_id) else "You're out until the next round.")
+		return
+	if e.is_mine():
+		_start_hold(e)
+	else:
+		pending_grab = e.ent_id
+		main.request_own(e.ent_id)
+
+
+func on_owner_changed(e: RigidBody3D) -> void:
+	if e.ent_id == pending_grab and e.is_mine():
+		pending_grab = -1
+		_start_hold(e)
+	elif held == e and not e.is_mine():
+		held = null
+
+
+func _start_hold(e: RigidBody3D) -> void:
+	held = e
+	hold_dist = 1.4 if main.is_dodgeball() else clampf(cam.global_position.distance_to(e.global_position), 1.6, 8.0)
+
+
+func _update_held() -> void:
+	if held == null:
+		return
+	if not is_instance_valid(held) or not held.is_mine():
+		held = null
+		return
+	var target := cam.global_position - cam.global_basis.z * hold_dist
+	held.sleeping = false
+	held.linear_velocity = ((target - held.global_position) * 14.0).limit_length(40.0)
+	held.angular_velocity *= 0.8
+
+
+func _drop() -> void:
+	held = null
+	pending_grab = -1
+
+
+func _throw() -> void:
+	if held == null or not is_instance_valid(held):
+		return
+	var speed := clampf(60.0 / sqrt(held.mass), 6.0, 30.0)
+	held.linear_velocity = -cam.global_basis.z * speed + velocity * 0.5
+	if main.is_dodgeball():
+		held.live_team = team
+	held = null
+
+
+func _delete_looked_at() -> void:
+	var e := _look_entity()
+	if e and e.driver_id == 0 and not main.is_dodgeball():
+		main.request_delete(e.ent_id)
+
+
+# Where to put something new from the spawn menu: on the ground a few steps in front of you.
+func spawn_spot(type: int) -> Array:
+	var vehicle_type := Entities.is_vehicle(type)
+	var fwd := -global_basis.z
+	var spot := global_position + fwd * (7.0 if vehicle_type else 3.0)
+	var q := PhysicsRayQueryParameters3D.create(spot + Vector3.UP * 6.0, spot - Vector3.UP * 20.0, 1, [get_rid()])
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	if not hit.is_empty():
+		spot = hit["position"]
+	spot += Vector3.UP * (0.6 if vehicle_type else 1.0)
+	return [spot, rotation.y]
+
+
+# ---------------- Funbrick tool ----------------
+
+func _tool_click(button: int) -> void:
+	match button:
+		MOUSE_BUTTON_LEFT:
+			hold_timer = 0.35
+			last_place_pos = Vector3.INF
+			last_painted = -1
+			if paint_mode:
+				_paint()
+			else:
+				_place()
+		MOUSE_BUTTON_RIGHT: _remove()
+		MOUSE_BUTTON_MIDDLE: _copy()
+		MOUSE_BUTTON_WHEEL_UP: _set_color(color_idx - 1)
+		MOUSE_BUTTON_WHEEL_DOWN: _set_color(color_idx + 1)
+
+
 func _hit_brick_id() -> int:
 	if not ray.is_colliding():
 		return -1
@@ -328,14 +591,6 @@ func _hit_brick_id() -> int:
 		return hit.get_meta("brick_id")
 	return -1
 
-
-func _use_door() -> void:
-	var id := _hit_brick_id()
-	if id >= 0 and main.bricks.has(id) and main.bricks[id][3] == Bricks.DOOR:
-		main.request_door(id)
-
-
-# ---------------- Funbrick tool ----------------
 
 func _set_color(i: int) -> void:
 	color_idx = posmod(i, Bricks.COLORS.size())
@@ -403,7 +658,7 @@ func _compute_place() -> bool:
 	var ix := roundf(q.x / Bricks.STUD - fx * 0.5)
 	var iz := roundf(q.z / Bricks.STUD - fz * 0.5)
 	place_pos = Vector3((ix + fx * 0.5) * Bricks.STUD, base_y + half.y, (iz + fz * 0.5) * Bricks.STUD)
-	if main.overlaps_any(place_pos, size, rot):
+	if main.overlaps_any(place_pos, size, rot) or not main.can_build_here(peer_id, place_pos, size, rot):
 		return false
 	var me := AABB(position + Vector3(-0.35, 0.05, -0.35), Vector3(0.7, 1.8, 0.7))
 	return not me.intersects(Bricks.box_of(place_pos, size, rot))

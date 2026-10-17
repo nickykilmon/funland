@@ -1,13 +1,14 @@
 extends CanvasLayer
 # Start screen: customize your funfig, then host a room (pick map, ground color, saved build) or join a friend.
 
-signal host_requested(info: Dictionary, map_id: int, plane_color: Color, build_name: String)
+signal host_requested(info: Dictionary, map_id: int, plane_color: Color, build_name: String, brick_limit: int)
 signal join_requested(info: Dictionary, ip: String)
 
 const Figure = preload("res://scripts/figure.gd")
 const Maps = preload("res://scripts/maps.gd")
 const SAVE_PATH := "user://profile.cfg"
 const BUILDS_DIR := "user://builds"
+const LIMITS := [0, 25, 50, 100, 250, 500]
 
 const COLOR_LABELS := {
 	"skin": "Face", "shirt": "Shirt", "pants": "Pants",
@@ -21,6 +22,7 @@ var option_btns := {}
 var map_opt: OptionButton
 var plane_pick: ColorPickerButton
 var build_opt: OptionButton
+var limit_opt: OptionButton
 var code_edit: LineEdit
 var room_list: VBoxContainer
 var status: Label
@@ -123,6 +125,10 @@ func _ready() -> void:
 	for b in list_builds():
 		build_opt.add_item(b)
 	_row(right, "Load build", build_opt)
+	limit_opt = OptionButton.new()
+	for l in LIMITS:
+		limit_opt.add_item("Unlimited" if l == 0 else "%d each" % l)
+	_row(right, "Brick limit", limit_opt)
 	var host_btn := Button.new()
 	host_btn.text = "Host Game"
 	host_btn.custom_minimum_size.y = 38
@@ -272,7 +278,7 @@ func set_status(text: String) -> void:
 func _on_host() -> void:
 	_save_profile()
 	var build := "" if build_opt.selected <= 0 else build_opt.get_item_text(build_opt.selected)
-	host_requested.emit(get_info(), map_opt.selected, plane_pick.color, build)
+	host_requested.emit(get_info(), map_opt.selected, plane_pick.color, build, LIMITS[maxi(limit_opt.selected, 0)])
 
 
 func _join(code: String) -> void:
