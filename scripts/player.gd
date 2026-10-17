@@ -204,8 +204,10 @@ func _local_physics(delta: float) -> void:
 	var top: float = main.water_top(position + Vector3.UP * 1.1)
 	var was_swimming := swimming
 	swimming = not is_nan(top)
-	if swimming and not was_swimming and velocity.y < -3.0:
-		main.audio.play("splash", position)
+	if swimming and not was_swimming:
+		main.progress.achieve("swim")
+		if velocity.y < -3.0:
+			main.audio.play("splash", position)
 	underwater = not is_nan(main.water_top(cam.global_position))
 	main.hud.set_underwater(underwater)
 	if swimming:
@@ -343,6 +345,9 @@ func _animate(delta: float, speed: float) -> void:
 	var prop := fig.get_node_or_null("Propeller") as Node3D
 	if prop:
 		prop.rotate_y(delta * (6.0 + speed * 3.0))
+	var pet := fig.get_node_or_null("Pet") as Node3D
+	if pet:
+		pet.position.y = 1.7 + sin(anim_time * 2.5 + peer_id) * 0.08
 	var cape := fig.get_node_or_null("Cape") as Node3D
 	if cape:
 		cape.rotation.x = lerpf(cape.rotation.x, 0.08 + amount * 0.7 + sin(walk_phase * 0.5) * 0.05 * amount, 0.1)
@@ -523,6 +528,7 @@ func _toolgun_click(button: int) -> void:
 			weld_first = e.ent_id
 		else:
 			if e.ent_id != weld_first:
+				main.progress.achieve("welder")
 				main.request_tool(main.TOOL_WELD, e.ent_id, Vector3.ZERO, Vector3.ZERO, weld_first)
 			weld_first = -1
 	elif tool_mode == main.TOOL_WIRE:
@@ -534,9 +540,11 @@ func _toolgun_click(button: int) -> void:
 			if e and (e.type == Entities.BUTTON or e.type == Entities.PLATE):
 				wire_src = e.ent_id
 		elif e and e.ent_id != wire_src:
+			main.progress.achieve("electrician")
 			main.request_wire(wire_src, "ent", e.ent_id)
 			wire_src = -1
 		elif h["brick"] >= 0:
+			main.progress.achieve("electrician")
 			main.request_wire(wire_src, "brick", h["brick"])
 			wire_src = -1
 	elif tool_mode == main.TOOL_REMOVER:
@@ -545,6 +553,10 @@ func _toolgun_click(button: int) -> void:
 		elif h["brick"] >= 0:
 			main.request_remove(h["brick"])
 	elif e:
+		if tool_mode == main.TOOL_BALLOON and not alt:
+			main.progress.achieve("balloonist")
+		elif tool_mode == main.TOOL_THRUSTER and not alt:
+			main.progress.achieve("rocketeer")
 		var inv: Transform3D = e.global_transform.affine_inverse()
 		main.request_tool(tool_mode, e.ent_id, inv * (h["point"] as Vector3), inv.basis * (h["normal"] as Vector3), 0, alt)
 	_update_toolgun_hud()
@@ -706,6 +718,8 @@ func _pad_button(b: int) -> void:
 
 
 func _emote(a: int) -> void:
+	if a == ANIM_DANCE:
+		main.progress.achieve("dance")
 	anim = ANIM_NONE if anim == a else a
 	anim_time = 0.0
 	if a == ANIM_SIT or a == ANIM_DANCE:
@@ -721,6 +735,7 @@ func _use() -> void:
 	var id := _hit_brick_id()
 	if id >= 0 and main.bricks.has(id) and main.bricks[id][3] == Bricks.DOOR:
 		main.request_door(id)
+		main.progress.achieve("first_door")
 		return
 	var looked := _look_entity()
 	if looked and Entities.TYPES[looked.type].get("explosive", false):
@@ -748,6 +763,7 @@ func enter_vehicle(e: RigidBody3D) -> void:
 	tool_on = false
 	_rebuild_ghost()
 	vehicle = e
+	main.progress.achieve("first_ride")
 	collision_layer = 0
 	collision_mask = 0
 	arm.add_excluded_object(e.get_rid())
@@ -779,6 +795,8 @@ func _seated_physics() -> void:
 		return
 	global_position = vehicle.global_transform * (vehicle.cfg["seat"] as Vector3)
 	velocity = Vector3.ZERO
+	if (vehicle.cfg["kind"] == Entities.HELI or vehicle.cfg["kind"] == Entities.PLANE) and vehicle.grounded == 0 and vehicle.linear_velocity.length() > 5.0 and global_position.y > 10.0:
+		main.progress.achieve("pilot")
 	fig.global_basis = vehicle.global_basis
 	_send(get_physics_process_delta_time(), vehicle.ent_id)
 	_pad_look(get_physics_process_delta_time())
@@ -863,6 +881,7 @@ func _throw() -> void:
 	if held == null or not is_instance_valid(held):
 		return
 	main.audio.play("throw", null, -6.0)
+	main.progress.add("throws")
 	var speed := clampf(60.0 / sqrt(held.mass), 6.0, 30.0)
 	held.linear_velocity = -cam.global_basis.z * speed + velocity * 0.5
 	if main.is_dodgeball():
@@ -990,6 +1009,8 @@ func _compute_place() -> bool:
 
 func _place() -> void:
 	if ghost and ghost.visible and ghost_valid:
+		main.progress.achieve("first_brick")
+		main.progress.add("bricks")
 		last_place_pos = place_pos
 		main.request_place(place_pos, _brick_size(), Bricks.COLORS[color_idx], shape, rot)
 
@@ -997,6 +1018,7 @@ func _place() -> void:
 func _paint() -> void:
 	var id := _hit_brick_id()
 	if id >= 0 and id != last_painted:
+		main.progress.add("paints")
 		last_painted = id
 		main.request_paint(id, Bricks.COLORS[color_idx])
 

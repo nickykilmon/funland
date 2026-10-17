@@ -219,6 +219,18 @@ func _build_pause_panel() -> void:
 	clear_btn.text = "Clear all bricks"
 	clear_btn.pressed.connect(func(): clear_pressed.emit())
 	vb.add_child(clear_btn)
+	var ach := Button.new()
+	ach.text = "🏆 Achievements & unlocks"
+	ach.pressed.connect(func():
+		var dlg := AcceptDialog.new()
+		dlg.title = "Achievements & unlocks"
+		var text := RichTextLabel.new()
+		text.text = get_parent().progress.progress_text()
+		text.custom_minimum_size = Vector2(560, 420)
+		dlg.add_child(text)
+		add_child(dlg)
+		dlg.popup_centered())
+	vb.add_child(ach)
 	var music := Button.new()
 	music.text = "Music on/off (M)"
 	music.pressed.connect(func(): get_parent().audio.toggle_music())

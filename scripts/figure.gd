@@ -6,11 +6,17 @@ const HATS := [
 	"None", "Cap", "Top Hat", "Crown", "Short Hair", "Long Hair", "Ponytail", "Beanie", "Cowboy Hat",
 	"Wizard Hat", "Party Hat", "Viking Helmet", "Chef Hat", "Propeller Cap", "Headphones", "Halo",
 	"Bunny Ears", "Space Helmet", "Pirate Hat",
+	"Ninja Headband", "Santa Hat", "Pumpkin Head", "Dino Hood", "Graduation Cap", "Construction Helmet",
+	"Pilot Goggles", "Golden Crown", "Flower Crown", "Traffic Cone Hat", "Unicorn Horn", "Astronaut Helmet",
 ]
-const FACES := ["Smile", "Grin", "Wink", "Surprised", "Cool Shades", "Angry", "Sleepy", "Beard", "Freckles", "Robot"]
-const PRINTS := ["Plain", "Stripes", "Star", "Heart", "Tie", "Suit", "Overalls", "Hoodie", "Lightning"]
-const LEGS := ["Pants", "Shorts", "Skirt", "Boots"]
-const ACCESSORIES := ["None", "Backpack", "Cape", "Jetpack", "Wings", "Sword", "Guitar", "Scarf", "Balloon"]
+const FACES := ["Smile", "Grin", "Wink", "Surprised", "Cool Shades", "Angry", "Sleepy", "Beard", "Freckles", "Robot",
+	"Star Eyes", "Heart Eyes", "Tongue Out", "Monocle", "Clown"]
+const PRINTS := ["Plain", "Stripes", "Star", "Heart", "Tie", "Suit", "Overalls", "Hoodie", "Lightning",
+	"Flames", "Checkers", "Dodgeball Champ", "Rainbow"]
+const LEGS := ["Pants", "Shorts", "Skirt", "Boots", "Robot Legs", "Rainbow Socks"]
+const ACCESSORIES := ["None", "Backpack", "Cape", "Jetpack", "Wings", "Sword", "Guitar", "Scarf", "Balloon",
+	"Angel Wings", "Dragon Wings", "Shield", "Pet Duck", "Rocket Pack"]
+const RAINBOW := [Color(0.9, 0.15, 0.15), Color(1.0, 0.55, 0.1), Color(1.0, 0.9, 0.15), Color(0.2, 0.75, 0.25), Color(0.2, 0.45, 0.95), Color(0.6, 0.3, 0.85)]
 
 # Option name -> list of choices, and color name -> default color. Used by the menu and to clean network data.
 const OPTIONS := {"hat": HATS, "face": FACES, "print": PRINTS, "legs": LEGS, "acc": ACCESSORIES}
@@ -167,6 +173,17 @@ static func _legs(root: Node3D, style: int, pants: Color, skin: Color) -> void:
 				box(leg, Vector3(0.28, 0.3, 0.34), Vector3(0, -0.2, 0), pants)
 				box(leg, Vector3(0.22, 0.34, 0.26), Vector3(0, -0.48, 0), skin)
 				box(leg, Vector3(0.28, 0.12, 0.42), Vector3(0, -0.66, -0.04), Color.WHITE)
+			4: # robot legs
+				var steel := Color(0.6, 0.62, 0.66)
+				box(leg, Vector3(0.22, 0.28, 0.26), Vector3(0, -0.18, 0), steel)
+				cyl(leg, 0.1, 0.3, Vector3(0, -0.36, 0), Color(0.3, 0.3, 0.33)).rotation.z = PI * 0.5
+				box(leg, Vector3(0.22, 0.26, 0.26), Vector3(0, -0.5, 0), steel)
+				box(leg, Vector3(0.3, 0.12, 0.44), Vector3(0, -0.66, -0.04), Color(0.3, 0.3, 0.33))
+			5: # rainbow socks
+				box(leg, Vector3(0.28, 0.3, 0.34), Vector3(0, -0.2, 0), pants)
+				for i in 4:
+					box(leg, Vector3(0.26, 0.08, 0.3), Vector3(0, -0.39 - i * 0.07, 0), RAINBOW[i])
+				box(leg, Vector3(0.28, 0.12, 0.42), Vector3(0, -0.66, -0.04), Color.WHITE)
 			3: # boots
 				var brown := Color(0.3, 0.17, 0.07)
 				box(leg, Vector3(0.28, 0.4, 0.34), Vector3(0, -0.24, 0), pants)
@@ -211,6 +228,22 @@ static func _print(root: Node3D, style: int, pc: Color, shirt: Color, pants: Col
 			box(root, Vector3(0.5, 0.16, 0.12), Vector3(0, 1.44, 0.14), shirt.darkened(0.15))
 			for x in [-0.06, 0.06]:
 				box(root, Vector3(0.02, 0.14, 0.01), Vector3(x, 1.32, z), pc)
+		9: # flames
+			for i in 5:
+				var f := box(root, Vector3(0.09, 0.3 + (i % 2) * 0.12, 0.01), Vector3(-0.22 + i * 0.11, 0.98, z), Color(1.0, 0.45, 0.05))
+				f.rotation.z = 0.2 - (i % 2) * 0.4
+				box(root, Vector3(0.05, 0.16, 0.012), Vector3(-0.22 + i * 0.11, 0.93, z - 0.002), Color(1.0, 0.85, 0.1))
+		10: # checkers
+			for cx in 4:
+				for cy in 3:
+					if (cx + cy) % 2 == 0:
+						box(root, Vector3(0.14, 0.14, 0.01), Vector3(-0.21 + cx * 0.14, 0.94 + cy * 0.15, z), pc)
+		11: # dodgeball champ
+			cyl(root, 0.15, 0.01, Vector3(0, 1.14, z), Color(0.85, 0.12, 0.12)).rotation.x = PI * 0.5
+			box(root, Vector3(0.05, 0.16, 0.012), Vector3(0, 1.14, z - 0.003), GOLD)
+		12: # rainbow
+			for i in 6:
+				box(root, Vector3(0.63, 0.09, 0.35), Vector3(0, 0.88 + i * 0.09, 0), RAINBOW[i])
 		8: # lightning
 			box(root, Vector3(0.05, 0.2, 0.01), Vector3(0.02, 1.25, z), pc).rotation.z = -0.5
 			box(root, Vector3(0.14, 0.05, 0.01), Vector3(0.0, 1.15, z), pc)
@@ -259,6 +292,38 @@ static func _face(root: Node3D, face: int, hc: Color) -> void:
 		8: # freckles
 			for x in [-0.12, -0.105, -0.13, 0.12, 0.105, 0.13]:
 				box(root, Vector3(0.015, 0.015, 0.02), Vector3(x, 1.63 + fposmod(x * 100.0, 3.0) * 0.008, z + 0.012), Color(0.7, 0.35, 0.1))
+		10: # star eyes
+			eyes = false
+			for x in [-0.07, 0.07]:
+				for a in [0.0, PI / 3.0, -PI / 3.0]:
+					box(root, Vector3(0.08, 0.025, 0.02), Vector3(x, 1.69, z), GOLD).rotation.z = a
+		11: # heart eyes
+			eyes = false
+			smile = false
+			for x in [-0.075, 0.075]:
+				box(root, Vector3(0.05, 0.05, 0.02), Vector3(x, 1.68, z), Color(0.9, 0.1, 0.2)).rotation.z = PI / 4.0
+				for dx in [-0.017, 0.017]:
+					cyl(root, 0.022, 0.02, Vector3(x + dx, 1.698, z), Color(0.9, 0.1, 0.2)).rotation.x = PI / 2.0
+			box(root, Vector3(0.18, 0.06, 0.02), Vector3(0, 1.58, z), BLACK)
+		12: # tongue out
+			box(root, Vector3(0.06, 0.07, 0.02), Vector3(0.02, 1.545, z - 0.003), Color(1.0, 0.45, 0.55))
+		13: # monocle
+			var mono := MeshInstance3D.new()
+			var tm := TorusMesh.new()
+			tm.inner_radius = 0.04
+			tm.outer_radius = 0.052
+			mono.mesh = tm
+			mono.material_override = mat(GOLD)
+			mono.position = Vector3(0.07, 1.69, z - 0.01)
+			mono.rotation.x = PI / 2.0
+			root.add_child(mono)
+			box(root, Vector3(0.16, 0.03, 0.03), Vector3(0, 1.615, z - 0.005), Color(0.35, 0.2, 0.08))
+		14: # clown
+			smile = false
+			sphere(root, 0.045, Vector3(0, 1.63, z - 0.02), Color(0.95, 0.1, 0.1))
+			box(root, Vector3(0.2, 0.05, 0.02), Vector3(0, 1.57, z), Color(0.9, 0.1, 0.1))
+			for x in [-0.1, 0.1]:
+				box(root, Vector3(0.04, 0.05, 0.02), Vector3(x, 1.59, z), Color(0.9, 0.1, 0.1))
 		9: # robot
 			eyes = false
 			smile = false
@@ -361,6 +426,73 @@ static func _hat(root: Node3D, hat: int, hc: Color) -> void:
 			var glass := sphere(root, 0.3, Vector3(0, 1.67, 0), Color(0.7, 0.9, 1.0, 0.25))
 			glass.material_override = glass_mat(Color(0.7, 0.9, 1.0, 0.25))
 			cyl(root, 0.25, 0.06, Vector3(0, 1.43, 0), Color.WHITE)
+		19: # ninja headband
+			cyl(root, 0.197, 0.06, Vector3(0, 1.75, 0), hc)
+			for side in [-1, 1]:
+				box(root, Vector3(0.04, 0.2, 0.03), Vector3(0.04 * side, 1.66, 0.2), hc).rotation.z = 0.3 * side
+		20: # santa hat
+			var santa := cyl(root, 0.0, 0.45, Vector3(0, 2.02, 0.04), Color(0.85, 0.1, 0.1), 0.2)
+			santa.rotation.x = 0.35
+			cyl(root, 0.22, 0.08, Vector3(0, 1.82, 0), Color.WHITE)
+			sphere(root, 0.06, Vector3(0, 2.2, 0.14), Color.WHITE)
+		21: # pumpkin head
+			var pumpkin := sphere(root, 0.3, Vector3(0, 1.68, 0), Color(1.0, 0.5, 0.08))
+			pumpkin.scale = Vector3(1.0, 0.85, 1.0)
+			cyl(root, 0.04, 0.12, Vector3(0, 1.98, 0), Color(0.25, 0.5, 0.15))
+			for x in [-0.1, 0.1]:
+				box(root, Vector3(0.07, 0.07, 0.02), Vector3(x, 1.74, -0.29), BLACK).rotation.z = PI / 4.0
+			box(root, Vector3(0.2, 0.05, 0.02), Vector3(0, 1.6, -0.285), BLACK)
+		22: # dino hood
+			var hood := sphere(root, 0.26, Vector3(0, 1.74, 0.03), hc)
+			hood.scale = Vector3(1.0, 0.9, 1.0)
+			for i in 4:
+				cyl(root, 0.0, 0.12, Vector3(0, 1.98 - i * 0.07, 0.04 + i * 0.07), hc.darkened(0.25), 0.05).rotation.x = 0.6 + i * 0.25
+			for x in [-0.08, 0.08]:
+				box(root, Vector3(0.05, 0.05, 0.02), Vector3(x, 1.93, -0.17), Color.WHITE)
+		23: # graduation cap
+			cyl(root, 0.2, 0.08, Vector3(0, 1.85, 0), BLACK)
+			box(root, Vector3(0.5, 0.03, 0.5), Vector3(0, 1.9, 0), BLACK)
+			box(root, Vector3(0.02, 0.2, 0.02), Vector3(0.22, 1.82, -0.22), GOLD)
+		24: # construction helmet
+			cyl(root, 0.17, 0.15, Vector3(0, 1.89, 0), Color(1.0, 0.82, 0.1), 0.22)
+			cyl(root, 0.26, 0.025, Vector3(0, 1.81, -0.02), Color(1.0, 0.82, 0.1))
+			box(root, Vector3(0.04, 0.12, 0.3), Vector3(0, 1.92, 0), Color(0.95, 0.75, 0.05))
+		25: # pilot goggles
+			cyl(root, 0.205, 0.12, Vector3(0, 1.84, 0), Color(0.45, 0.28, 0.12))
+			cyl(root, 0.197, 0.04, Vector3(0, 1.79, 0), Color(0.3, 0.2, 0.1))
+			for x in [-0.08, 0.08]:
+				var g := cyl(root, 0.055, 0.04, Vector3(x, 1.86, -0.18), Color(0.4, 0.8, 1.0))
+				g.rotation.x = PI / 2.0 - 0.4
+				g.material_override = glass_mat(Color(0.4, 0.8, 1.0, 0.6))
+		26: # golden crown
+			cyl(root, 0.22, 0.14, Vector3(0, 1.88, 0), GOLD)
+			for i in 8:
+				var a := TAU * i / 8.0
+				cyl(root, 0.0, 0.14, Vector3(cos(a) * 0.19, 2.01, sin(a) * 0.19), GOLD, 0.045)
+			var gems := [Color.RED, Color(0.2, 0.5, 1), Color(0.2, 0.9, 0.3), Color(0.8, 0.3, 1)]
+			for i in 4:
+				var a := TAU * i / 4.0
+				var gem := sphere(root, 0.03, Vector3(cos(a) * 0.222, 1.88, sin(a) * 0.222), gems[i])
+				gem.material_override = glow_mat(gems[i])
+		27: # flower crown
+			for i in 10:
+				var a := TAU * i / 10.0
+				sphere(root, 0.05, Vector3(cos(a) * 0.2, 1.83, sin(a) * 0.2), RAINBOW[i % RAINBOW.size()].lightened(0.3))
+			cyl(root, 0.2, 0.025, Vector3(0, 1.82, 0), Color(0.3, 0.6, 0.2))
+		28: # traffic cone hat
+			cyl(root, 0.0, 0.5, Vector3(0, 2.1, 0), Color(1.0, 0.45, 0.05), 0.2)
+			cyl(root, 0.11, 0.07, Vector3(0, 2.05, 0), Color.WHITE, 0.13)
+			box(root, Vector3(0.48, 0.04, 0.48), Vector3(0, 1.85, 0), Color(1.0, 0.45, 0.05))
+		29: # unicorn horn
+			var horn := cyl(root, 0.0, 0.32, Vector3(0, 2.0, -0.08), Color(1.0, 0.9, 0.5), 0.05)
+			horn.rotation.x = -0.35
+			for i in 4:
+				box(root, Vector3(0.05, 0.08 + i * 0.04, 0.1), Vector3(0, 1.84 - i * 0.05, 0.14 + i * 0.02), RAINBOW[i])
+		30: # astronaut helmet
+			sphere(root, 0.3, Vector3(0, 1.67, 0), Color.WHITE)
+			var visor := box(root, Vector3(0.36, 0.22, 0.05), Vector3(0, 1.69, -0.26), GOLD)
+			visor.material_override = glass_mat(Color(1.0, 0.8, 0.3, 0.85))
+			cyl(root, 0.25, 0.06, Vector3(0, 1.43, 0), Color(0.85, 0.85, 0.88))
 		18: # pirate hat
 			cyl(root, 0.2, 0.08, Vector3(0, 1.85, 0), BLACK)
 			var top := box(root, Vector3(0.56, 0.16, 0.2), Vector3(0, 1.94, 0), BLACK)
@@ -410,6 +542,42 @@ static func _accessory(root: Node3D, acc: int, ac: Color) -> void:
 		7: # scarf
 			box(root, Vector3(0.48, 0.1, 0.4), Vector3(0, 1.43, 0), ac)
 			box(root, Vector3(0.12, 0.32, 0.04), Vector3(0.13, 1.26, -0.2), ac)
+		9: # angel wings
+			for side in [-1, 1]:
+				for i in 3:
+					var w := box(root, Vector3(0.75 - i * 0.18, 0.12, 0.03), Vector3((0.4 + i * 0.03) * side, 1.42 - i * 0.12, 0.22), Color.WHITE)
+					w.rotation = Vector3(0, -0.4 * side, (0.5 - i * 0.15) * side)
+		10: # dragon wings
+			for side in [-1, 1]:
+				var wing := Node3D.new()
+				wing.position = Vector3(0.2 * side, 1.3, 0.22)
+				wing.rotation = Vector3(0, -0.5 * side, 0.3 * side)
+				root.add_child(wing)
+				box(wing, Vector3(0.8, 0.05, 0.05), Vector3(0.4 * side, 0.2, 0), ac.darkened(0.3))
+				for i in 3:
+					box(wing, Vector3(0.25, 0.4, 0.02), Vector3((0.2 + i * 0.22) * side, -0.02, 0), ac).rotation.z = 0.2 * side
+		11: # shield
+			var shield := cyl(root, 0.28, 0.06, Vector3(0, 1.12, 0.23), ac)
+			shield.rotation.x = PI / 2.0
+			var boss := cyl(root, 0.09, 0.08, Vector3(0, 1.12, 0.26), GOLD)
+			boss.rotation.x = PI / 2.0
+		12: # pet duck floating next to you
+			var pet := Node3D.new()
+			pet.name = "Pet"
+			pet.position = Vector3(0.7, 1.7, 0.2)
+			root.add_child(pet)
+			sphere(pet, 0.16, Vector3.ZERO, Color(1.0, 0.9, 0.15))
+			sphere(pet, 0.1, Vector3(0, 0.17, -0.1), Color(1.0, 0.9, 0.15))
+			box(pet, Vector3(0.08, 0.03, 0.08), Vector3(0, 0.16, -0.22), Color(1.0, 0.5, 0.05))
+			for x in [-0.04, 0.04]:
+				box(pet, Vector3(0.02, 0.02, 0.01), Vector3(x, 0.2, -0.19), BLACK)
+		13: # rocket pack
+			for side in [-1, 1]:
+				cyl(root, 0.12, 0.6, Vector3(0.14 * side, 1.12, 0.3), Color(0.85, 0.15, 0.12))
+				cyl(root, 0.0, 0.18, Vector3(0.14 * side, 1.5, 0.3), Color(0.9, 0.9, 0.92), 0.12)
+				box(root, Vector3(0.02, 0.2, 0.16), Vector3(0.24 * side, 0.9, 0.3), Color(0.9, 0.9, 0.92))
+				var flame := cyl(root, 0.08, 0.3, Vector3(0.14 * side, 0.68, 0.3), Color(1.0, 0.6, 0.1), 0.0)
+				flame.material_override = glow_mat(Color(1.0, 0.6, 0.1))
 		8: # balloon held in the left hand
 			var arm := root.get_node("ArmL")
 			cyl(arm, 0.006, 1.0, Vector3(0, -0.05, -0.02), Color.WHITE)

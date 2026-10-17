@@ -28,6 +28,7 @@ const MenuScript = preload("res://scripts/menu.gd")
 const HudScript = preload("res://scripts/hud.gd")
 const RelayPeer = preload("res://scripts/relay_peer.gd")
 const AudioScript = preload("res://scripts/audio.gd")
+const ProgressScript = preload("res://scripts/progress.gd")
 
 const EXPLOSION_RADIUS := 4.0
 const BLAST_RADIUS := 9.0
@@ -74,6 +75,7 @@ var auto_join := false
 var using_pad := false
 var test_mode := false   # headless test runs: no captured mouse, so don't auto-pause
 var audio: Node
+var progress: Node
 var water_boxes: Array = []   # [AABB, surface y]
 var fuses := {}               # host: explosive entity id -> seconds left
 var wires: Array = []         # [source entity id, "ent"/"brick", target id]
@@ -95,6 +97,9 @@ func _ready() -> void:
 	_add_pad_ui_controls()
 	audio = AudioScript.new()
 	add_child(audio)
+	progress = ProgressScript.new()
+	add_child(progress)
+	progress.unlocked.connect(_on_unlocked)
 	menu = MenuScript.new()
 	add_child(menu)
 	menu.host_requested.connect(host_game)
@@ -237,8 +242,17 @@ func fetch_rooms() -> void:
 		list_ws = null
 
 
+func _on_unlocked(text: String) -> void:
+	audio.play("unlock")
+	if hud:
+		hud.add_system("🏆 " + text)
+		hud.big_message("🏆 " + text, 3.0)
+
+
 func _process(delta: float) -> void:
 	_poll_room_list()
+	if in_game:
+		progress.tick(delta)
 	for key in dirty_chunks:
 		_rebuild_chunk(key)
 	dirty_chunks.clear()
@@ -323,6 +337,7 @@ func _start_world() -> void:
 		var size: Vector3 = ((w.get_child(0) as CollisionShape3D).shape as BoxShape3D).size
 		water_boxes.append([AABB(w.position - size * 0.5, size), w.get_meta("top")])
 	audio.start_music(map_id)
+	progress.visit_map(map_id, Maps.NAMES.size())
 	brick_root = Node3D.new()
 	brick_root.name = "Bricks"
 	add_child(brick_root)
@@ -614,6 +629,8 @@ func explode_at(pos: Vector3) -> void:
 				e.apply_central_impulse((d.normalized() + Vector3.UP * 0.6).normalized() * e.mass * 16.0 * push)
 				e.angular_velocity += Vector3(randf_range(-4, 4), randf_range(-4, 4), randf_range(-4, 4)) * push
 	var p := local_player()
+	if p and p.global_position.distance_to(pos) < 20.0:
+		progress.achieve("kaboom")
 	if p and not p.vehicle:
 		var d: Vector3 = p.global_position + Vector3.UP - pos
 		if d.length() < BLAST_RADIUS:
@@ -879,6 +896,7 @@ func _on_spawn_chosen(type: int) -> void:
 
 
 func request_spawn(type: int, pos: Vector3, yaw: float) -> void:
+	progress.add("spawns")
 	if multiplayer.is_server():
 		_server_spawn(1, type, pos, yaw)
 	else:
@@ -1077,6 +1095,7 @@ func _dodge_tick() -> void:
 			if red == 0 or blue == 0:
 				var winner := "blue" if red == 0 else "red"
 				score[winner] += 1
+				round_won.rpc(winner)
 				_dodge_set("roundover", ROUND_OVER_TIME, "%s WINS THE ROUND!" % winner.to_upper())
 		"roundover":
 			if dodge_timer <= 0.0:
@@ -1135,6 +1154,13 @@ func dodge_update(state: String, timer: float, new_score: Dictionary, alive_ids:
 		p.respawn()
 	elif state == "playing" and was_alive and not alive.has(my_id()):
 		p.knocked_out()
+
+
+@rpc("authority", "call_local", "reliable")
+func round_won(team: String) -> void:
+	if teams.get(my_id(), "") == team:
+		progress.add("dodge_wins")
+		progress.achieve("champion")
 
 
 func request_team(team: String) -> void:
@@ -1198,7 +1224,17 @@ func _server_hit(thrower: int, victim: int, team: String) -> void:
 		return
 	alive.erase(victim)
 	_dodge_sync("")
+	if thrower == 1:
+		credit_hit()
+	else:
+		credit_hit.rpc_id(thrower)
 	system_msg.rpc("%s got hit by %s!" % [players[victim]["name"], players[thrower]["name"]])
+
+
+@rpc("authority", "reliable")
+func credit_hit() -> void:
+	progress.add("hits")
+	progress.achieve("dodger")
 
 
 func report_brick_hit(brick_id: int) -> void:
@@ -1874,6 +1910,17 @@ func _handle_test_args() -> void:
 				print("TEST plate pressed=", entities[plate].state.get("pressed"), " TNT still there=", entities.has(tnt), " fuses=", fuses)
 				var ea = entities[a_id]
 				print("TEST A freeze=", ea.freeze, " sleeping=", ea.sleeping, " mine=", ea.is_mine(), " state=", ea.state.keys(), " balloons=", ea.state.get("balloons"), " gs=", ea.gravity_scale, " paused=", get_tree().paused))
+		elif a == "autofigs":
+			var made := 0
+			for key in Figure.OPTIONS:
+				for i in Figure.OPTIONS[key].size():
+					var f := Figure.build({key: i})
+					made += f.find_children("*", "MeshInstance3D", true, false).size()
+					f.free()
+			print("TEST built every cosmetic, meshes=", made)
+			progress.achieve("first_brick")
+			progress.add("bricks", 100)
+			print("TEST unlocked helmet=", progress.is_unlocked("hat", 24), " checkers=", progress.is_unlocked("print", 10), " golden crown=", progress.is_unlocked("hat", 26))
 		elif a == "autoteam":
 			get_tree().create_timer(2.5).timeout.connect(func(): request_team("red" if multiplayer.is_server() else "blue"))
 		elif a.begins_with("autosave="):

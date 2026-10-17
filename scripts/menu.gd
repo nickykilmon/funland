@@ -69,19 +69,31 @@ func _ready() -> void:
 	name_edit.placeholder_text = "Your name"
 	name_edit.max_length = 16
 	_row(left, "Name", name_edit)
+	var progress = get_parent().progress
 	for key in Figure.OPTIONS:
 		var ob := OptionButton.new()
-		for item in Figure.OPTIONS[key]:
-			ob.add_item(item)
+		var items: Array = Figure.OPTIONS[key]
+		for i in items.size():
+			if progress.is_unlocked(key, i):
+				ob.add_item(items[i])
+			else:
+				ob.add_item("🔒 %s (%s)" % [items[i], progress.requirement(key, i)])
+				ob.set_item_disabled(i, true)
 		ob.item_selected.connect(func(_i): _rebuild_preview())
 		option_btns[key] = ob
 		_row(left, OPTION_LABELS[key], ob)
 	for key in Figure.COLOR_DEFAULTS:
 		color_picks[key] = _color_row(left, COLOR_LABELS[key], Figure.COLOR_DEFAULTS[key])
+	var btn_row := HBoxContainer.new()
+	left.add_child(btn_row)
 	var rand := Button.new()
 	rand.text = "🎲 Randomize"
 	rand.pressed.connect(_randomize)
-	left.add_child(rand)
+	btn_row.add_child(rand)
+	var ach := Button.new()
+	ach.text = "🏆 Unlocks"
+	ach.pressed.connect(_show_progress)
+	btn_row.add_child(ach)
 
 	# --- preview ---
 	var svc := SubViewportContainer.new()
@@ -257,6 +269,18 @@ func get_info() -> Dictionary:
 	return info
 
 
+func _show_progress() -> void:
+	var dlg := AcceptDialog.new()
+	dlg.title = "Achievements & unlocks"
+	var text := RichTextLabel.new()
+	text.text = get_parent().progress.progress_text()
+	text.custom_minimum_size = Vector2(560, 420)
+	text.scroll_active = true
+	dlg.add_child(text)
+	add_child(dlg)
+	dlg.popup_centered()
+
+
 func _randomize() -> void:
 	var skins := [Color(1.0, 0.8, 0.15), Color(0.98, 0.8, 0.65), Color(0.85, 0.62, 0.42), Color(0.6, 0.4, 0.25), Color(0.4, 0.26, 0.15)]
 	color_picks["skin"].color = skins.pick_random()
@@ -264,7 +288,11 @@ func _randomize() -> void:
 		color_picks[key].color = Color.from_hsv(randf(), randf_range(0.3, 0.9), randf_range(0.3, 1.0))
 	for key in option_btns:
 		var ob: OptionButton = option_btns[key]
-		ob.select(randi() % ob.item_count)
+		var choices := []
+		for i in ob.item_count:
+			if not ob.is_item_disabled(i):
+				choices.append(i)
+		ob.select(choices.pick_random())
 	_rebuild_preview()
 
 
@@ -345,6 +373,7 @@ func _load_profile() -> void:
 		color_picks[key].color = cfg.get_value("player", key, color_picks[key].color)
 	for key in option_btns:
 		var ob: OptionButton = option_btns[key]
-		ob.select(clampi(cfg.get_value("player", key, 0), 0, ob.item_count - 1))
+		var idx := clampi(cfg.get_value("player", key, 0), 0, ob.item_count - 1)
+		ob.select(0 if ob.is_item_disabled(idx) else idx)
 	map_opt.select(clampi(cfg.get_value("menu", "map", 0), 0, map_opt.item_count - 1))
 	plane_pick.color = cfg.get_value("menu", "plane", plane_pick.color)
