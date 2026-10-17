@@ -223,7 +223,7 @@ static func dress(body: RigidBody3D, type: int) -> void:
 			pm.size = Vector3(2.0, 1.2, 0.5)
 			bow.mesh = pm
 			bow.material_override = Figure.mat(hull)
-			bow.rotation = Vector3(PI * 0.5, 0, 0)
+			bow.rotation = Vector3(-PI * 0.5, 0, 0)
 			bow.position = Vector3(0, 0.25, -2.05)
 			body.add_child(bow)
 			Figure.box(body, Vector3(1.6, 0.1, 1.0), Vector3(0, 0.55, 1.2), Color(0.55, 0.38, 0.2))
