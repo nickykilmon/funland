@@ -63,6 +63,7 @@ var ent_spawner := {}   # entity id -> peer who spawned it (host only)
 var next_ent_id := 1
 var ent_send_timer := 0.0
 var pending_ents := []  # entities from a loaded build, spawned once the world exists
+var pending_wires := []
 var map_id := 0
 var plane_color := Color(0.3, 0.68, 0.25)
 var room_code := ""
@@ -75,6 +76,8 @@ var test_mode := false   # headless test runs: no captured mouse, so don't auto-
 var audio: Node
 var water_boxes: Array = []   # [AABB, surface y]
 var fuses := {}               # host: explosive entity id -> seconds left
+var wires: Array = []         # [source entity id, "ent"/"brick", target id]
+var plate_timer := 0.0
 
 # dodgeball (decided by the host, copied to everyone)
 var dodge_state := "waiting"   # waiting / build / playing / roundover
@@ -175,10 +178,18 @@ func _on_room_ready(code: String) -> void:
 		return
 	players[1] = my_info
 	_start_world()
+	var first_ent := next_ent_id
 	for e in pending_ents:
-		_add_entity(next_ent_id, e[0], e[1], e[2], 1, 0)
+		_add_entity(next_ent_id, e[0], e[1], e[2], 1, 0, e[3])
 		ent_spawner[next_ent_id - 1] = 1
+	for w in pending_wires:
+		var bids: Array = w[3]
+		if w[1] == "ent":
+			wires.append([first_ent + w[0], "ent", first_ent + w[2]])
+		elif w[2] < bids.size():
+			wires.append([first_ent + w[0], "brick", bids[w[2]]])
 	pending_ents.clear()
+	pending_wires.clear()
 	_spawn_player(1, my_info)
 	hud.is_host = true
 	hud.set_room(code)
@@ -251,6 +262,10 @@ func _physics_process(delta: float) -> void:
 	if not in_game:
 		return
 	if multiplayer.is_server():
+		plate_timer -= delta
+		if plate_timer <= 0.0:
+			plate_timer = 0.2
+			_check_plates()
 		for id in fuses.keys():
 			fuses[id] -= delta
 			if fuses[id] <= 0.0:
@@ -410,10 +425,10 @@ func register(info: Dictionary) -> void:
 		blist.append([bid, b[0], b[1], b[2], b[3], b[4], doors_open.has(bid)])
 	var elist := []
 	for e in entities.values():
-		elist.append([e.ent_id, e.type, e.position, e.quaternion, e.owner_id, e.driver_id])
+		elist.append([e.ent_id, e.type, e.position, e.quaternion, e.owner_id, e.driver_id, e.state])
 	var extra := {
 		"teams": teams, "limit": brick_limit, "state": dodge_state, "timer": dodge_timer,
-		"score": score, "alive": alive.keys(),
+		"score": score, "alive": alive.keys(), "wires": wires,
 	}
 	setup_world.rpc_id(id, map_id, plane_color, players, blist, elist, extra)
 	for other in players:
@@ -436,13 +451,14 @@ func setup_world(m: int, c: Color, plist: Dictionary, blist: Array, elist: Array
 	alive.clear()
 	for a in extra.get("alive", []):
 		alive[a] = true
+	wires = extra.get("wires", [])
 	for b in blist:
 		if b[6]:
 			doors_open[b[0]] = true
 		_add_brick(b[0], b[1], b[2], b[3], b[4], b[5])
 	_start_world()
 	for e in elist:
-		_add_entity(e[0], e[1], e[2], e[3], e[4], e[5])
+		_add_entity(e[0], e[1], e[2], e[3], e[4], e[5], e[6] if e.size() > 6 else {})
 	for id in plist:
 		_spawn_player(id, plist[id])
 	if is_dodgeball():
@@ -643,6 +659,214 @@ func _explosion_fx(pos: Vector3) -> void:
 	tw.chain().tween_callback(fx.queue_free)
 
 
+# ---------------- Tool gun ----------------
+
+enum { TOOL_WELD, TOOL_FREEZE, TOOL_BALLOON, TOOL_THRUSTER, TOOL_WIRE, TOOL_REMOVER }
+const TOOL_NAMES := ["Weld", "Freeze", "Balloon", "Thruster", "Wire", "Remover"]
+const TOOL_HINTS := [
+	"Click one thing, then another, to weld them together",
+	"Click to pin something in place (click again to let go)",
+	"Click to tie a balloon on · right click pops them",
+	"Click to stick on a thruster (F turns them on/off) · right click removes them",
+	"Click a button or pressure plate, then a door / lamp / thruster / TNT · right click cuts its wires",
+	"Click anything to delete it",
+]
+
+
+@rpc("authority", "call_local", "reliable")
+func set_ent_state(id: int, st: Dictionary) -> void:
+	var e = entities.get(id)
+	if e:
+		e.apply_state(st)
+
+
+func _push_state(e: Node) -> void:
+	set_ent_state.rpc(e.ent_id, e.state.duplicate(true))
+
+
+# point/normal are in the target's local space.
+func request_tool(tool: int, id: int, point: Vector3, normal: Vector3, extra := 0, alt := false) -> void:
+	if multiplayer.is_server():
+		_server_tool(1, tool, id, point, normal, extra, alt)
+	else:
+		req_tool.rpc_id(1, tool, id, point, normal, extra, alt)
+
+
+@rpc("any_peer", "reliable")
+func req_tool(tool: int, id: int, point: Vector3, normal: Vector3, extra: int, alt: bool) -> void:
+	if multiplayer.is_server():
+		_server_tool(multiplayer.get_remote_sender_id(), tool, id, point, normal, extra, alt)
+
+
+func _server_tool(_peer: int, tool: int, id: int, point: Vector3, normal: Vector3, extra: int, alt: bool) -> void:
+	if is_dodgeball():
+		return
+	var e = entities.get(id)
+	match tool:
+		TOOL_WELD:
+			var other = entities.get(extra)
+			if e == null or other == null or e == other or Entities.is_vehicle(other.type) or other.driver_id != 0:
+				return
+			var list: Array = e.state.get("welded", []).duplicate()
+			var rel: Transform3D = e.global_transform.affine_inverse() * other.global_transform
+			list.append([other.type, rel])
+			for part in other.state.get("welded", []):
+				list.append([part[0], rel * (part[1] as Transform3D)])
+			if list.size() > 24:
+				return
+			delete_ent.rpc(extra)
+			e.state["welded"] = list
+			_push_state(e)
+		TOOL_FREEZE:
+			if e and e.driver_id == 0:
+				e.state["frozen"] = not e.state.get("frozen", false)
+				_push_state(e)
+		TOOL_BALLOON:
+			if e == null:
+				return
+			var b: Array = e.state.get("balloons", []).duplicate()
+			if alt:
+				b.clear()
+			elif b.size() < 12:
+				b.append(point)
+			e.state["balloons"] = b
+			_push_state(e)
+		TOOL_THRUSTER:
+			if e == null:
+				return
+			var t: Array = e.state.get("thrusters", []).duplicate()
+			if alt:
+				t.clear()
+			elif t.size() < 8:
+				t.append([point, -normal.normalized()])
+			e.state["thrusters"] = t
+			_push_state(e)
+		TOOL_REMOVER:
+			if e and e.driver_id == 0:
+				delete_ent.rpc(id)
+
+
+func request_wire(src: int, kind: String, target: int, clear := false) -> void:
+	if multiplayer.is_server():
+		_server_wire(src, kind, target, clear)
+	else:
+		req_wire.rpc_id(1, src, kind, target, clear)
+
+
+@rpc("any_peer", "reliable")
+func req_wire(src: int, kind: String, target: int, clear: bool) -> void:
+	if multiplayer.is_server():
+		_server_wire(src, kind, target, clear)
+
+
+func _server_wire(src: int, kind: String, target: int, clear: bool) -> void:
+	var e = entities.get(src)
+	if e == null or (e.type != Entities.BUTTON and e.type != Entities.PLATE):
+		return
+	var list := wires.duplicate()
+	if clear:
+		list = list.filter(func(w): return w[0] != src)
+	else:
+		if (kind == "ent" and not entities.has(target)) or (kind == "brick" and not bricks.has(target)):
+			return
+		if list.size() >= 300:
+			return
+		list.append([src, kind, target])
+	wires_set.rpc(list)
+
+
+@rpc("authority", "call_local", "reliable")
+func wires_set(list: Array) -> void:
+	wires = list
+	audio.play("beep", null, -8.0)
+
+
+# F on a button / lamp / thing with thrusters.
+func request_press(id: int) -> void:
+	if multiplayer.is_server():
+		_server_press(id)
+	else:
+		req_press.rpc_id(1, id)
+
+
+@rpc("any_peer", "reliable")
+func req_press(id: int) -> void:
+	if multiplayer.is_server():
+		_server_press(id)
+
+
+func _server_press(id: int) -> void:
+	var e = entities.get(id)
+	if e == null:
+		return
+	if e.type == Entities.BUTTON:
+		pressed_fx.rpc(id)
+		_trigger(id, true, true)
+	elif e.type == Entities.LAMP or not e.state.get("thrusters", []).is_empty():
+		e.state["on"] = not e.state.get("on", true)
+		_push_state(e)
+
+
+@rpc("authority", "call_local", "reliable")
+func pressed_fx(id: int) -> void:
+	var e = entities.get(id)
+	if e:
+		e.press_anim()
+		audio.play("click", e.global_position)
+
+
+# Sends a button press or plate change down its wires.
+func _trigger(src: int, active: bool, toggle: bool) -> void:
+	for w in wires:
+		if w[0] != src:
+			continue
+		if w[1] == "brick":
+			var bid: int = w[2]
+			if not bricks.has(bid) or bricks[bid][3] != Bricks.DOOR:
+				continue
+			var want := not doors_open.has(bid) if toggle else active
+			if want != doors_open.has(bid):
+				set_door.rpc(bid, want)
+		else:
+			var t = entities.get(w[2])
+			if t == null:
+				continue
+			if Entities.TYPES[t.type].get("explosive", false):
+				if toggle or active:
+					fuses[t.ent_id] = 0.05
+			elif t.type == Entities.LAMP or not t.state.get("thrusters", []).is_empty():
+				var want: bool = not t.state.get("on", true) if toggle else active
+				if want != t.state.get("on", true):
+					t.state["on"] = want
+					_push_state(t)
+			elif t.type == Entities.BUTTON:
+				pressed_fx.rpc(t.ent_id)
+
+
+# Host: a plate is pressed while a player or a prop rests on it.
+func _check_plates() -> void:
+	for e in entities.values():
+		if e.type != Entities.PLATE:
+			continue
+		var area := AABB(e.global_position + Vector3(-0.8, 0.0, -0.8), Vector3(1.6, 1.6, 1.6))
+		var pressed := false
+		for p in player_nodes.values():
+			if area.has_point(p.global_position + Vector3.UP * 0.2):
+				pressed = true
+				break
+		if not pressed:
+			for other in entities.values():
+				if other != e and area.has_point(other.global_position):
+					pressed = true
+					break
+		if pressed != e.state.get("pressed", false):
+			e.state["pressed"] = pressed
+			_push_state(e)
+			if pressed:
+				pressed_fx.rpc(e.ent_id)
+			_trigger(e.ent_id, pressed, false)
+
+
 func entity_respawn_point() -> Vector3:
 	return Maps.spawn_point(map_id) + Vector3(randf_range(-3, 3), 3, randf_range(-3, 3))
 
@@ -690,7 +914,7 @@ func spawn_ent(id: int, type: int, pos: Vector3, rot: Quaternion, owner_peer: in
 	_add_entity(id, type, pos, rot, owner_peer, driver)
 
 
-func _add_entity(id: int, type: int, pos: Vector3, rot: Quaternion, owner_peer: int, driver: int) -> void:
+func _add_entity(id: int, type: int, pos: Vector3, rot: Quaternion, owner_peer: int, driver: int, st := {}) -> void:
 	next_ent_id = maxi(next_ent_id, id + 1)
 	if entities.has(id) or entity_root == null:
 		return
@@ -703,6 +927,7 @@ func _add_entity(id: int, type: int, pos: Vector3, rot: Quaternion, owner_peer: 
 	e.main = self
 	e.position = pos
 	e.quaternion = rot
+	e.state = st
 	entity_root.add_child(e)
 	entities[id] = e
 
@@ -728,6 +953,8 @@ func _server_delete(id: int) -> void:
 @rpc("authority", "call_local", "reliable")
 func delete_ent(id: int) -> void:
 	ent_spawner.erase(id)
+	fuses.erase(id)
+	wires = wires.filter(func(w): return w[0] != id and not (w[1] == "ent" and w[2] == id))
 	if entities.has(id):
 		entities[id].queue_free()
 		entities.erase(id)
@@ -749,6 +976,9 @@ func req_own(id: int) -> void:
 
 func _server_own(peer: int, id: int) -> void:
 	var e = entities.get(id)
+	if e and e.state.get("frozen", false) and e.type != Entities.BUTTON and e.type != Entities.PLATE:
+		e.state["frozen"] = false
+		_push_state(e)
 	if e and e.owner_id != peer and (e.driver_id == 0 or e.driver_id == peer):
 		set_ent_owner.rpc(id, peer)
 
@@ -1356,8 +1586,27 @@ func save_build(build_name: String) -> int:
 	for e in entities.values():
 		var p: Vector3 = e.position
 		var q: Quaternion = e.quaternion
-		ents.append([e.type, p.x, p.y, p.z, q.x, q.y, q.z, q.w])
-	var data := {"version": 2, "map": map_id, "ground": plane_color.to_html(false), "bricks": list, "ents": ents}
+		ents.append([e.type, p.x, p.y, p.z, q.x, q.y, q.z, q.w, var_to_str(e.state)])
+	# wires refer to things by their position in the lists above
+	var ent_index := {}
+	var i := 0
+	for e in entities.values():
+		ent_index[e.ent_id] = i
+		i += 1
+	var brick_index := {}
+	i = 0
+	for id in bricks:
+		brick_index[id] = i
+		i += 1
+	var wire_list := []
+	for w in wires:
+		if not ent_index.has(w[0]):
+			continue
+		if w[1] == "ent" and ent_index.has(w[2]):
+			wire_list.append([ent_index[w[0]], "ent", ent_index[w[2]]])
+		elif w[1] == "brick" and brick_index.has(w[2]):
+			wire_list.append([ent_index[w[0]], "brick", brick_index[w[2]]])
+	var data := {"version": 3, "map": map_id, "ground": plane_color.to_html(false), "bricks": list, "ents": ents, "wires": wire_list}
 	DirAccess.make_dir_recursive_absolute(BUILDS_DIR)
 	var f := FileAccess.open("%s/%s.json" % [BUILDS_DIR, build_name], FileAccess.WRITE)
 	if f == null:
@@ -1377,6 +1626,7 @@ func _load_build(build_name: String) -> int:
 	map_id = clampi(int(data.get("map", map_id)), 0, Maps.NAMES.size() - 1)
 	plane_color = Color.from_string(str(data.get("ground", "")), plane_color)
 	var count := 0
+	var brick_ids := []
 	for b in data.get("bricks", []):
 		if not b is Array or b.size() < 10:
 			continue
@@ -1390,11 +1640,17 @@ func _load_build(build_name: String) -> int:
 			doors_open[id] = true
 		brick_owner[id] = 1
 		_add_brick(id, Vector3(b[0], b[1], b[2]), size, Color.from_string(str(b[6]), Color.WHITE), shape, rot)
+		brick_ids.append(id)
 		count += 1
 	pending_ents.clear()
 	for e in data.get("ents", []):
 		if e is Array and e.size() >= 8 and int(e[0]) >= 0 and int(e[0]) < Entities.TYPES.size():
-			pending_ents.append([int(e[0]), Vector3(e[1], e[2], e[3]), Quaternion(e[4], e[5], e[6], e[7]).normalized()])
+			var st = str_to_var(e[8]) if e.size() > 8 else {}
+			pending_ents.append([int(e[0]), Vector3(e[1], e[2], e[3]), Quaternion(e[4], e[5], e[6], e[7]).normalized(), st if st is Dictionary else {}])
+	pending_wires = []
+	for w in data.get("wires", []):
+		if w is Array and w.size() == 3:
+			pending_wires.append([int(w[0]), str(w[1]), int(w[2]), brick_ids])
 	return count
 
 
@@ -1558,6 +1814,66 @@ func _handle_test_args() -> void:
 						var start: Vector3 = e.position
 						await get_tree().create_timer(4.0).timeout
 						print("TEST boat moved ", snappedf(e.position.distance_to(start), 0.1), " y=", snappedf(e.position.y, 0.01), " up=", e.global_basis.y.snapped(Vector3.ONE * 0.01)))
+		elif a == "autoballoon":
+			get_tree().create_timer(2.5).timeout.connect(func():
+				request_spawn(0, Vector3(0, 0.6, -6), 0.0)
+				request_spawn(0, Vector3(1.0, 0.6, -6), 0.0)
+				await get_tree().create_timer(1.5).timeout
+				var e = entities.values()[0]
+				print("TEST before weld y=", e.position.y)
+				request_tool(TOOL_WELD, e.ent_id, Vector3.ZERO, Vector3.ZERO, entities.values()[1].ent_id)
+				await get_tree().create_timer(0.3).timeout
+				for i in 3:
+					request_tool(TOOL_BALLOON, e.ent_id, Vector3(0, 0.5, 0), Vector3.UP)
+				for i in 3:
+					request_tool(TOOL_BALLOON, e.ent_id, Vector3(0, 0.5, 0), Vector3.UP)
+				for k in 6:
+					await get_tree().create_timer(0.3).timeout
+					print("TEST bal y=", snappedf(e.position.y, 0.01), " v=", e.linear_velocity.snapped(Vector3.ONE * 0.01), " sleep=", e.sleeping, " freeze=", e.freeze, " mass=", e.mass))
+		elif a == "autotools":
+			get_tree().create_timer(2.5).timeout.connect(func():
+				var wait := func(t): await get_tree().create_timer(t).timeout
+				request_spawn(0, Vector3(0, 0.6, -6), 0.0)      # crate A
+				request_spawn(0, Vector3(1.0, 0.6, -6), 0.0)    # crate B, touching A
+				request_spawn(Entities.BUTTON, Vector3(-4, 0.65, -6), 0.0)
+				request_spawn(Entities.LAMP, Vector3(5, 1.2, -6), 0.0)
+				request_spawn(Entities.PLATE, Vector3(12, 0.05, -6), 0.0)
+				request_spawn(19, Vector3(16, 0.4, -6), 0.0)    # TNT
+				request_spawn(1, Vector3(-8, 0.4, -6), 0.0)     # small crate for a thruster
+				request_place(Vector3(0.2, 15 * Bricks.PLATE * 0.5, -14.2), Bricks.size_for(Bricks.DOOR, 0), Color.WHITE, Bricks.DOOR, 0)
+				await wait.call(2.0)
+				var ids := entities.keys()
+				var a_id: int = ids[0]
+				var b_id: int = ids[1]
+				var button: int = ids[2]
+				var lamp: int = ids[3]
+				var plate: int = ids[4]
+				var tnt: int = ids[5]
+				var small: int = ids[6]
+				var door: int = bricks.keys()[0]
+				print("TEST A at ", entities[a_id].position, " B at ", entities[b_id].position)
+				request_tool(TOOL_WELD, a_id, Vector3.ZERO, Vector3.ZERO, b_id)
+				await wait.call(0.3)
+				print("TEST weld: B gone=", not entities.has(b_id), " A parts=", entities[a_id].state.get("welded", []).size(), " A mass=", entities[a_id].mass)
+				for i in 3:
+					request_tool(TOOL_BALLOON, a_id, Vector3(0, 0.5, 0), Vector3.UP)
+				var small_y: float = entities[small].position.y
+				request_tool(TOOL_THRUSTER, small, Vector3(0, -0.3, 0), Vector3.DOWN)
+				request_wire(button, "ent", lamp)
+				request_wire(button, "brick", door)
+				request_wire(plate, "ent", tnt)
+				await wait.call(2.0)
+				print("TEST A v=", entities[a_id].linear_velocity, " sleep=", entities[a_id].sleeping, " freeze=", entities[a_id].freeze, " colliders=", entities[a_id].get_children().filter(func(c): return c is CollisionShape3D).size())
+				print("TEST balloons lifted A to y=", snappedf(entities[a_id].position.y, 0.1), " thruster crate y ", snappedf(small_y, 0.1), " -> ", snappedf(entities[small].position.y, 0.1) if entities.has(small) else "gone")
+				print("TEST wires=", wires.size(), " lamp on=", entities[lamp].state.get("on"), " door open=", doors_open.has(door))
+				request_press(button)
+				await wait.call(0.5)
+				print("TEST after button: lamp on=", entities[lamp].state.get("on"), " door open=", doors_open.has(door))
+				request_spawn(1, Vector3(12, 1.5, -6), 0.0)    # drop a crate on the plate
+				await wait.call(1.5)
+				print("TEST plate pressed=", entities[plate].state.get("pressed"), " TNT still there=", entities.has(tnt), " fuses=", fuses)
+				var ea = entities[a_id]
+				print("TEST A freeze=", ea.freeze, " sleeping=", ea.sleeping, " mine=", ea.is_mine(), " state=", ea.state.keys(), " balloons=", ea.state.get("balloons"), " gs=", ea.gravity_scale, " paused=", get_tree().paused))
 		elif a == "autoteam":
 			get_tree().create_timer(2.5).timeout.connect(func(): request_team("red" if multiplayer.is_server() else "blue"))
 		elif a.begins_with("autosave="):

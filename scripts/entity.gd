@@ -32,14 +32,26 @@ var last_speed := 0.0
 var exploded := false
 var engine: AudioStreamPlayer3D
 
+# tool gun state (decided by the host, copied to everyone)
+var state := {}         # frozen, on, balloons [local points], thrusters [[point, dir]], welded [[type, Transform3D]]
+var base_mass := 1.0
+var balloon_nodes: Array[Node3D] = []
+var balloon_points: Array = []
+
 
 func _ready() -> void:
+	net_pos = position
+	net_rot = quaternion
 	cfg = Entities.TYPES[type]
 	collision_layer = 16
 	collision_mask = 1 | 2 | 4 | 16
 	mass = cfg["mass"]
+	base_mass = mass
 	gravity_scale = main.gravity_scale()
 	Entities.dress(self, type)
+	if state.is_empty():
+		state = {"frozen": cfg.get("frozen", false), "on": true}
+	apply_state(state)
 	for i in cfg.get("wheels", []).size():
 		wheel_nodes.append(get_node("Wheel%d" % i))
 	if cfg["kind"] != Entities.ITEM:
@@ -72,7 +84,7 @@ func set_owner_id(id: int) -> void:
 
 func _apply_owner() -> void:
 	var mine := is_mine()
-	freeze = not mine
+	freeze = not mine or state.get("frozen", false)
 	if mine and not was_mine:
 		position = net_pos
 		quaternion = net_rot
@@ -107,6 +119,7 @@ func state_to_send() -> Array:
 
 func _physics_process(delta: float) -> void:
 	if is_mine():
+		_attachments_physics()
 		if not sleeping:
 			_float(delta)
 		if cfg["kind"] != Entities.ITEM:
@@ -290,6 +303,92 @@ func _plane(delta: float, driving: bool, pitch_in: float, roll_in: float, thr_up
 		angular_velocity = angular_velocity.lerp(b * local, 0.12)
 
 
+# ---------------- tool gun attachments ----------------
+
+func _attachments_physics() -> void:
+	if state.get("frozen", false):
+		return
+	var g := 9.8 * gravity_scale
+	var balloons: Array = state.get("balloons", [])
+	var thrusters: Array = state.get("thrusters", [])
+	var on: bool = state.get("on", true)
+	if balloons.is_empty() and (thrusters.is_empty() or not on):
+		return
+	sleeping = false
+	# each balloon lifts about 15 kg and air drag keeps the climb gentle
+	for p in balloons:
+		apply_force(Vector3.UP * 15.0 * g, global_basis * (p as Vector3))
+	if not balloons.is_empty():
+		apply_central_force(-linear_velocity * mass * 2.0)
+		angular_velocity *= 0.97
+	if on:
+		for t in thrusters:
+			apply_force(global_basis * (t[1] as Vector3) * mass * 30.0, global_basis * (t[0] as Vector3))
+
+
+func apply_state(st: Dictionary) -> void:
+	state = st
+	_apply_owner()
+	for c in get_children():
+		if c.has_meta("attach"):
+			remove_child(c)
+			c.queue_free()
+	balloon_nodes.clear()
+	balloon_points = state.get("balloons", [])
+	mass = base_mass
+	# welded parts: copy the other things' meshes and collision shapes into this body
+	for part in state.get("welded", []):
+		var donor := RigidBody3D.new()
+		Entities.dress(donor, part[0])
+		var rel: Transform3D = part[1]
+		mass += Entities.TYPES[part[0]]["mass"]
+		for c in donor.get_children():
+			donor.remove_child(c)
+			if c is Node3D:
+				(c as Node3D).transform = rel * (c as Node3D).transform
+			c.set_meta("attach", true)
+			add_child(c)
+		donor.free()
+	for i in balloon_points.size():
+		var b := Node3D.new()
+		b.set_meta("attach", true)
+		b.top_level = true
+		add_child(b)
+		Entities.Figure.cyl(b, 0.008, 2.0, Vector3(0, -1.1, 0), Color.WHITE)
+		Entities.Figure.sphere(b, 0.4, Vector3.ZERO, Entities.BALLOON_COLORS[(ent_id + i) % Entities.BALLOON_COLORS.size()])
+		balloon_nodes.append(b)
+	var on: bool = state.get("on", true)
+	for t in state.get("thrusters", []):
+		var th := Node3D.new()
+		th.set_meta("attach", true)
+		var dir: Vector3 = t[1]
+		th.position = t[0]
+		add_child(th)
+		th.look_at_from_position(t[0], (t[0] as Vector3) - dir, Vector3.UP if absf(dir.y) < 0.9 else Vector3.RIGHT)
+		var body := Entities.Figure.cyl(th, 0.12, 0.3, Vector3(0, 0, 0.12), Color(0.35, 0.35, 0.38))
+		body.rotation.x = PI * 0.5
+		if on:
+			var flame := Entities.Figure.cyl(th, 0.1, 0.5, Vector3(0, 0, 0.45), Color(0.4, 0.7, 1.0), 0.0)
+			flame.rotation.x = -PI * 0.5
+			flame.material_override = Entities.Figure.glow_mat(Color(0.4, 0.7, 1.0))
+	var light := get_node_or_null("Light") as OmniLight3D
+	if light:
+		light.visible = on
+		var bulb := get_node_or_null("Bulb") as MeshInstance3D
+		bulb.material_override = Entities.Figure.glow_mat(Color(1.0, 0.95, 0.7)) if on else Entities.Figure.mat(Color(0.5, 0.5, 0.45))
+	var cap := get_node_or_null("Cap") as Node3D
+	if cap and type == Entities.PLATE:
+		cap.position.y = -0.04 if on and state.has("pressed") and state["pressed"] else 0.0
+
+
+func press_anim() -> void:
+	var cap := get_node_or_null("Cap") as Node3D
+	if cap:
+		var tw := cap.create_tween()
+		tw.tween_property(cap, "position:z", -0.1, 0.08)
+		tw.tween_property(cap, "position:z", -0.17, 0.15)
+
+
 static func _stick(axis: JoyAxis) -> float:
 	var v := Input.get_joy_axis(0, axis)
 	return 0.0 if absf(v) < 0.2 else v
@@ -340,6 +439,9 @@ func flip_upright() -> void:
 
 
 func _animate(delta: float) -> void:
+	for i in balloon_nodes.size():
+		balloon_nodes[i].global_position = global_transform * (balloon_points[i] as Vector3) + Vector3.UP * 2.2
+		balloon_nodes[i].global_basis = Basis()
 	if cfg["kind"] == Entities.ITEM:
 		return
 	var running := driver_id != 0 or rotor_speed > 0.05

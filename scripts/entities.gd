@@ -7,6 +7,10 @@ const Figure = preload("res://scripts/figure.gd")
 enum { ITEM, CAR, HELI, PLANE, BOAT }
 
 const DODGEBALL_TYPE := 4
+const BUTTON := 22
+const PLATE := 23
+const LAMP := 24
+const BALLOON_COLORS := [Color(1, 0.2, 0.25), Color(0.25, 0.55, 1), Color(1, 0.85, 0.15), Color(0.4, 0.9, 0.35), Color(0.9, 0.4, 1), Color(1, 0.55, 0.15)]
 
 const TYPES := [
 	{"name": "Crate", "kind": ITEM, "mass": 20.0},
@@ -43,6 +47,9 @@ const TYPES := [
 	{"name": "TNT", "kind": ITEM, "mass": 10.0, "explosive": true},
 	{"name": "Explosive Barrel", "kind": ITEM, "mass": 20.0, "explosive": true},
 	{"name": "Boat", "kind": BOAT, "mass": 500.0, "seat": Vector3(0, 0.35, 1.0), "cam": 8.0, "com_y": -0.3},
+	{"name": "Button", "kind": ITEM, "mass": 5.0, "frozen": true, "rest_y": 0.65},
+	{"name": "Pressure Plate", "kind": ITEM, "mass": 10.0, "frozen": true, "rest_y": 0.05},
+	{"name": "Lamp", "kind": ITEM, "mass": 8.0},
 ]
 
 
@@ -221,6 +228,40 @@ static func dress(body: RigidBody3D, type: int) -> void:
 			Figure.box(body, Vector3(0.4, 0.6, 0.4), Vector3(0, 0.55, 2.2), Color(0.2, 0.2, 0.22))
 			_glass(body, Vector3(1.6, 0.45, 0.05), Vector3(0, 0.75, -0.3), -0.3)
 			_box_shape(body, Vector3(2.0, 0.5, 4.4), Vector3(0, 0.25, 0.0))
+	match type:
+		BUTTON:
+			Figure.box(body, Vector3(0.12, 1.0, 0.12), Vector3(0, -0.1, 0), Color(0.4, 0.4, 0.42))
+			Figure.box(body, Vector3(0.5, 0.3, 0.3), Vector3(0, 0.45, 0), Color(0.3, 0.3, 0.32))
+			var cap := Node3D.new()
+			cap.name = "Cap"
+			cap.position = Vector3(0, 0.45, -0.17)
+			body.add_child(cap)
+			Figure.cyl(cap, 0.1, 0.08, Vector3.ZERO, Color(0.9, 0.1, 0.1)).rotation.x = PI * 0.5
+			Figure.box(body, Vector3(0.5, 0.1, 0.5), Vector3(0, -0.6, 0), Color(0.3, 0.3, 0.32))
+			_box_shape(body, Vector3(0.5, 1.25, 0.5), Vector3(0, -0.02, 0))
+		PLATE:
+			Figure.box(body, Vector3(1.6, 0.08, 1.6), Vector3.ZERO, Color(0.45, 0.45, 0.48))
+			var top := Node3D.new()
+			top.name = "Cap"
+			body.add_child(top)
+			Figure.box(top, Vector3(1.3, 0.06, 1.3), Vector3(0, 0.06, 0), Color(0.95, 0.8, 0.1))
+			_box_shape(body, Vector3(1.6, 0.1, 1.6))
+		LAMP:
+			Figure.box(body, Vector3(0.5, 0.08, 0.5), Vector3(0, -1.1, 0), Color(0.2, 0.2, 0.22))
+			Figure.cyl(body, 0.05, 2.1, Vector3(0, -0.05, 0), Color(0.2, 0.2, 0.22))
+			Figure.cyl(body, 0.12, 0.25, Vector3(0, 1.05, 0), Color(0.2, 0.2, 0.22), 0.3)
+			var bulb := Figure.sphere(body, 0.14, Vector3(0, 0.92, 0), Color(1.0, 0.95, 0.7))
+			bulb.name = "Bulb"
+			bulb.material_override = Figure.glow_mat(Color(1.0, 0.95, 0.7))
+			var light := OmniLight3D.new()
+			light.name = "Light"
+			light.position = Vector3(0, 0.8, 0)
+			light.light_color = Color(1.0, 0.9, 0.7)
+			light.light_energy = 2.0
+			light.omni_range = 14.0
+			light.shadow_enabled = true
+			body.add_child(light)
+			_box_shape(body, Vector3(0.5, 2.3, 0.5), Vector3(0, -0.05, 0))
 	if is_vehicle(type) and t.has("wheels"):
 		_wheels(body, t)
 

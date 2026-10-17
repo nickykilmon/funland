@@ -12,12 +12,12 @@ const Bricks = preload("res://scripts/bricks.gd")
 const Entities = preload("res://scripts/entities.gd")
 
 const HELP := """WASD move · Space jump · Shift run · V camera · T chat · Tab players
-B spawn menu · Click grab/drop · Right click throw · X delete · F drive / door / light TNT · M music
-E funbrick tool · G wave · H dance · C sit"""
+B spawn menu · Click grab/drop · Right click throw · X delete · F use / drive / light TNT · M music
+E funbrick tool · Y tool gun (weld, freeze, balloon, thruster, wire) · G wave · H dance · C sit"""
 const DODGE_HELP := """WASD move · Space jump · Shift run · V camera · T chat · Tab players
 Click grab a ball · Right click throw · E build defenses (build phase)"""
 const PAD_HELP := """Controller: left stick move · right stick look · A jump · L3 run · R3 camera
-RT grab/place · LT throw/remove · X drive/door · Y brick tool · B delete/undo
+RT grab/place · LT throw/remove · X use/drive · Y hands > bricks > tool gun · B delete/undo
 LB/RB distance or color · D-pad emotes (tool: size/shape/rotate) · Back spawn menu
 Driving: RT gas/up · LT brake/down · stick steer · Y flip"""
 const DRIVE_HELP := {
@@ -50,6 +50,7 @@ var dodgeball := false
 var last_tool := []
 var pause_open := false
 var water_tint: ColorRect
+var toolgun_label: Label
 var resume_btn: Button
 var spawn_first: Button
 var team_first: Button
@@ -115,6 +116,19 @@ func _ready() -> void:
 	water_tint.visible = false
 	add_child(water_tint)
 	move_child(water_tint, 0)
+	toolgun_label = Label.new()
+	toolgun_label.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	toolgun_label.offset_left = -360
+	toolgun_label.offset_right = 360
+	toolgun_label.offset_top = -90
+	toolgun_label.offset_bottom = -14
+	toolgun_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	toolgun_label.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+	toolgun_label.add_theme_font_size_override("font_size", 17)
+	toolgun_label.add_theme_color_override("font_color", Color(0.6, 0.95, 1.0))
+	_outline(toolgun_label)
+	toolgun_label.visible = false
+	add_child(toolgun_label)
 	_build_tool_panel()
 	_build_pause_panel()
 	_build_spawn_menu()
@@ -514,6 +528,11 @@ func set_dodge(state: String, timer: float, score: Dictionary, red_alive: int, b
 	if my_team != "":
 		line += "\nYou're on %s" % my_team.to_upper()
 	dodge_label.text = line
+
+
+func set_toolgun(text: String) -> void:
+	toolgun_label.text = text
+	toolgun_label.visible = text != ""
 
 
 func set_underwater(on: bool) -> void:

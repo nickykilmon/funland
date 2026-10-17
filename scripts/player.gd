@@ -47,6 +47,13 @@ var hold_dist := 2.5
 var pending_grab := -1
 var push_asked := {}   # entity id -> time we last asked to push it
 
+# tool gun
+var toolgun_on := false
+var tool_mode := 0
+var weld_first := -1
+var wire_src := -1
+var wire_mesh: MeshInstance3D
+
 # driving
 var vehicle: RigidBody3D
 var remote_vehicle := -1
@@ -249,6 +256,7 @@ func _local_physics(delta: float) -> void:
 	_pad_triggers(menus)
 	_update_held()
 	_update_ghost()
+	_draw_wires()
 	# hold the mouse button (or right trigger) to keep placing / painting
 	var holding := (Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)) or (rt_was and not menus)
 	if tool_on and holding:
@@ -371,7 +379,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 		if vehicle:
 			return
-		if tool_on:
+		if toolgun_on:
+			_toolgun_click(mb.button_index)
+		elif tool_on:
 			_tool_click(mb.button_index)
 		else:
 			_hands_click(mb.button_index)
@@ -402,8 +412,12 @@ func _key(ke: InputEventKey) -> void:
 			_toggle_tool()
 		KEY_B:
 			_spawn_menu()
+		KEY_Y:
+			_toggle_toolgun()
 		KEY_Q:
-			if tool_on:
+			if toolgun_on:
+				_tool_mode_step(-1 if ke.shift_pressed else 1)
+			elif tool_on:
 				_shape_step(-1 if ke.shift_pressed else 1)
 		KEY_R:
 			if tool_on:
@@ -439,8 +453,132 @@ func _key(ke: InputEventKey) -> void:
 
 func _toggle_tool() -> void:
 	tool_on = not tool_on
+	if tool_on and toolgun_on:
+		_toggle_toolgun()
 	_drop()
 	_rebuild_ghost()
+
+
+func _toggle_toolgun() -> void:
+	if main.is_dodgeball():
+		return
+	toolgun_on = not toolgun_on
+	weld_first = -1
+	wire_src = -1
+	if toolgun_on and tool_on:
+		tool_on = false
+		_rebuild_ghost()
+	_drop()
+	_update_toolgun_hud()
+
+
+func _tool_mode_step(d: int) -> void:
+	tool_mode = posmod(tool_mode + d, main.TOOL_NAMES.size())
+	weld_first = -1
+	wire_src = -1
+	_update_toolgun_hud()
+
+
+func _update_toolgun_hud() -> void:
+	var text := ""
+	if toolgun_on:
+		text = "TOOL GUN: %s   (Q to switch, Y to put away)\n%s" % [main.TOOL_NAMES[tool_mode], main.TOOL_HINTS[tool_mode]]
+		if weld_first >= 0:
+			text += "\nNow click the thing to weld it to"
+		if wire_src >= 0:
+			text += "\nNow click what it should control"
+	main.hud.set_toolgun(text)
+
+
+# What the crosshair is on: {entity, brick, point, normal} (entity/brick may be null/-1).
+func _look_hit() -> Dictionary:
+	var from := cam.global_position
+	var to := from - cam.global_basis.z * (REACH + 6.0 + arm.spring_length)
+	var q := PhysicsRayQueryParameters3D.create(from, to, 1 | 16, [get_rid()])
+	var hit := get_world_3d().direct_space_state.intersect_ray(q)
+	var out := {"entity": null, "brick": -1}
+	if hit.is_empty():
+		return out
+	var body = hit["collider"]
+	out["point"] = hit["position"]
+	out["normal"] = hit["normal"]
+	if body is RigidBody3D and "ent_id" in body:
+		out["entity"] = body
+	elif body is Node and body.has_meta("brick_id"):
+		out["brick"] = body.get_meta("brick_id")
+	return out
+
+
+func _toolgun_click(button: int) -> void:
+	if button != MOUSE_BUTTON_LEFT and button != MOUSE_BUTTON_RIGHT:
+		return
+	var alt := button == MOUSE_BUTTON_RIGHT
+	var h := _look_hit()
+	var e: RigidBody3D = h["entity"]
+	main.audio.play("click", null, -10.0)
+	if tool_mode == main.TOOL_WELD:
+		if e == null:
+			return
+		if weld_first < 0:
+			weld_first = e.ent_id
+		else:
+			if e.ent_id != weld_first:
+				main.request_tool(main.TOOL_WELD, e.ent_id, Vector3.ZERO, Vector3.ZERO, weld_first)
+			weld_first = -1
+	elif tool_mode == main.TOOL_WIRE:
+		if alt:
+			if e:
+				main.request_wire(e.ent_id, "", 0, true)
+			wire_src = -1
+		elif wire_src < 0:
+			if e and (e.type == Entities.BUTTON or e.type == Entities.PLATE):
+				wire_src = e.ent_id
+		elif e and e.ent_id != wire_src:
+			main.request_wire(wire_src, "ent", e.ent_id)
+			wire_src = -1
+		elif h["brick"] >= 0:
+			main.request_wire(wire_src, "brick", h["brick"])
+			wire_src = -1
+	elif tool_mode == main.TOOL_REMOVER:
+		if e:
+			main.request_tool(main.TOOL_REMOVER, e.ent_id, Vector3.ZERO, Vector3.ZERO)
+		elif h["brick"] >= 0:
+			main.request_remove(h["brick"])
+	elif e:
+		var inv: Transform3D = e.global_transform.affine_inverse()
+		main.request_tool(tool_mode, e.ent_id, inv * (h["point"] as Vector3), inv.basis * (h["normal"] as Vector3), 0, alt)
+	_update_toolgun_hud()
+
+
+# Thin lines showing every wire while the wire tool is out.
+func _draw_wires() -> void:
+	var show: bool = toolgun_on and tool_mode == main.TOOL_WIRE
+	if wire_mesh == null:
+		wire_mesh = MeshInstance3D.new()
+		wire_mesh.mesh = ImmediateMesh.new()
+		var m := StandardMaterial3D.new()
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		m.albedo_color = Color(1.0, 0.85, 0.1)
+		m.no_depth_test = true
+		wire_mesh.material_override = m
+		wire_mesh.top_level = true
+		add_child(wire_mesh)
+	var im := wire_mesh.mesh as ImmediateMesh
+	im.clear_surfaces()
+	if not show or main.wires.is_empty():
+		return
+	im.surface_begin(Mesh.PRIMITIVE_LINES)
+	for w in main.wires:
+		var a = main.entities.get(w[0])
+		var b_pos = null
+		if w[1] == "ent" and main.entities.has(w[2]):
+			b_pos = main.entities[w[2]].global_position
+		elif w[1] == "brick" and main.bricks.has(w[2]):
+			b_pos = main.bricks[w[2]][0]
+		if a and b_pos != null:
+			im.surface_add_vertex(a.global_position)
+			im.surface_add_vertex(b_pos)
+	im.surface_end()
 
 
 func _spawn_menu() -> void:
@@ -488,12 +626,16 @@ func _pad_triggers(menus: bool) -> void:
 	var lt := Input.get_joy_axis(0, JOY_AXIS_TRIGGER_LEFT) > 0.5
 	if not menus and not vehicle:
 		if rt and not rt_was:
-			if tool_on:
+			if toolgun_on:
+				_toolgun_click(MOUSE_BUTTON_LEFT)
+			elif tool_on:
 				_tool_click(MOUSE_BUTTON_LEFT)
 			else:
 				_hands_click(MOUSE_BUTTON_LEFT)
 		if lt and not lt_was:
-			if tool_on:
+			if toolgun_on:
+				_toolgun_click(MOUSE_BUTTON_RIGHT)
+			elif tool_on:
 				_tool_click(MOUSE_BUTTON_RIGHT)
 			else:
 				_hands_click(MOUSE_BUTTON_RIGHT)
@@ -518,7 +660,13 @@ func _pad_button(b: int) -> void:
 		return
 	match b:
 		JOY_BUTTON_Y:
-			_toggle_tool()
+			if toolgun_on:
+				_toggle_toolgun()
+			elif tool_on:
+				_toggle_tool()
+				_toggle_toolgun()
+			else:
+				_toggle_tool()
 		JOY_BUTTON_B:
 			if tool_on:
 				main.request_undo()
@@ -545,10 +693,12 @@ func _pad_button(b: int) -> void:
 			if tool_on: _size_step(-1)
 			else: _emote(ANIM_SIT)
 		JOY_BUTTON_DPAD_LEFT:
-			if tool_on: _shape_step(1)
+			if toolgun_on: _tool_mode_step(-1)
+			elif tool_on: _shape_step(1)
 			else: _emote(ANIM_DANCE)
 		JOY_BUTTON_DPAD_RIGHT:
-			if tool_on: _rotate()
+			if toolgun_on: _tool_mode_step(1)
+			elif tool_on: _rotate()
 			else:
 				paint_mode = true
 				tool_on = true
@@ -575,6 +725,9 @@ func _use() -> void:
 	var looked := _look_entity()
 	if looked and Entities.TYPES[looked.type].get("explosive", false):
 		main.request_fuse(looked.ent_id)
+		return
+	if looked and (looked.type == Entities.BUTTON or looked.type == Entities.LAMP or not looked.state.get("thrusters", []).is_empty()):
+		main.request_press(looked.ent_id)
 		return
 	var best: RigidBody3D = null
 	var best_d := 4.5
@@ -732,7 +885,7 @@ func spawn_spot(type: int) -> Array:
 	var hit := get_world_3d().direct_space_state.intersect_ray(q)
 	if not hit.is_empty():
 		spot = hit["position"]
-	spot += Vector3.UP * (0.6 if vehicle_type else 1.0)
+	spot += Vector3.UP * float(Entities.TYPES[type].get("rest_y", 0.6 if vehicle_type else 1.0))
 	return [spot, rotation.y]
 
 
