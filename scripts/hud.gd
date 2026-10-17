@@ -50,6 +50,8 @@ var dodgeball := false
 var last_tool := []
 var pause_open := false
 var water_tint: ColorRect
+var blind: ColorRect
+var team_mode := false
 var toolgun_label: Label
 var resume_btn: Button
 var spawn_first: Button
@@ -129,6 +131,20 @@ func _ready() -> void:
 	_outline(toolgun_label)
 	toolgun_label.visible = false
 	add_child(toolgun_label)
+	blind = ColorRect.new()
+	blind.color = Color(0.02, 0.02, 0.04, 0.97)
+	blind.set_anchors_preset(Control.PRESET_FULL_RECT)
+	blind.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	blind.visible = false
+	add_child(blind)
+	var blind_text := Label.new()
+	blind_text.text = "You're a SEEKER. Eyes closed while the hiders hide..."
+	blind_text.set_anchors_preset(Control.PRESET_CENTER)
+	blind_text.offset_left = -300
+	blind_text.offset_right = 300
+	blind_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	blind_text.add_theme_font_size_override("font_size", 24)
+	blind.add_child(blind_text)
 	_build_tool_panel()
 	_build_pause_panel()
 	_build_spawn_menu()
@@ -254,7 +270,7 @@ func _process(delta: float) -> void:
 	big_timer -= delta
 	big_label.visible = big_timer > 0.0
 	var my_team: String = get_parent().teams.get(get_parent().my_id(), "")
-	team_panel.visible = dodgeball and my_team == ""
+	team_panel.visible = team_mode and my_team == ""
 	if team_panel.visible or spawn_panel.visible:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	var pad: bool = get_parent().using_pad
@@ -517,6 +533,16 @@ func _build_dodge_labels() -> void:
 	_outline(drive_label)
 	drive_label.visible = false
 	add_child(drive_label)
+
+
+func set_blind(on: bool) -> void:
+	blind.visible = on
+
+
+func set_mode_status(text: String) -> void:
+	dodge_label.visible = text != "" or dodgeball
+	if text != "":
+		dodge_label.text = text
 
 
 func set_dodgeball(on: bool) -> void:

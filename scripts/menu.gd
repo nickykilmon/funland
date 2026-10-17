@@ -1,11 +1,12 @@
 extends CanvasLayer
 # Start screen: customize your funfig, then host a room (pick map, ground color, saved build) or join a friend.
 
-signal host_requested(info: Dictionary, map_id: int, plane_color: Color, build_name: String, brick_limit: int)
+signal host_requested(info: Dictionary, map_id: int, plane_color: Color, build_name: String, brick_limit: int, game_mode: int)
 signal join_requested(info: Dictionary, ip: String)
 
 const Figure = preload("res://scripts/figure.gd")
 const Maps = preload("res://scripts/maps.gd")
+const Modes = preload("res://scripts/modes.gd")
 const SAVE_PATH := "user://profile.cfg"
 const BUILDS_DIR := "user://builds"
 const LIMITS := [0, 25, 50, 100, 250, 500]
@@ -23,6 +24,7 @@ var map_opt: OptionButton
 var plane_pick: ColorPickerButton
 var build_opt: OptionButton
 var limit_opt: OptionButton
+var mode_opt: OptionButton
 var host_btn: Button
 var code_edit: LineEdit
 var room_list: VBoxContainer
@@ -132,6 +134,10 @@ func _ready() -> void:
 	for m in Maps.NAMES:
 		map_opt.add_item(m)
 	_row(right, "Map", map_opt)
+	mode_opt = OptionButton.new()
+	for m in Modes.NAMES:
+		mode_opt.add_item(m)
+	_row(right, "Game mode", mode_opt)
 	plane_pick = _color_row(right, "Ground color", Color(0.3, 0.68, 0.25))
 	build_opt = OptionButton.new()
 	build_opt.add_item("(start empty)")
@@ -309,7 +315,7 @@ func set_status(text: String) -> void:
 func _on_host() -> void:
 	_save_profile()
 	var build := "" if build_opt.selected <= 0 else build_opt.get_item_text(build_opt.selected)
-	host_requested.emit(get_info(), map_opt.selected, plane_pick.color, build, LIMITS[maxi(limit_opt.selected, 0)])
+	host_requested.emit(get_info(), map_opt.selected, plane_pick.color, build, LIMITS[maxi(limit_opt.selected, 0)], maxi(mode_opt.selected, 0))
 
 
 func _join(code: String) -> void:
@@ -360,6 +366,7 @@ func _save_profile() -> void:
 	for k in info:
 		cfg.set_value("player", k, info[k])
 	cfg.set_value("menu", "map", map_opt.selected)
+	cfg.set_value("menu", "mode", mode_opt.selected)
 	cfg.set_value("menu", "plane", plane_pick.color)
 	cfg.save(SAVE_PATH)
 
@@ -376,4 +383,5 @@ func _load_profile() -> void:
 		var idx := clampi(cfg.get_value("player", key, 0), 0, ob.item_count - 1)
 		ob.select(0 if ob.is_item_disabled(idx) else idx)
 	map_opt.select(clampi(cfg.get_value("menu", "map", 0), 0, map_opt.item_count - 1))
+	mode_opt.select(clampi(cfg.get_value("menu", "mode", 0), 0, mode_opt.item_count - 1))
 	plane_pick.color = cfg.get_value("menu", "plane", plane_pick.color)

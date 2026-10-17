@@ -134,6 +134,40 @@ func _exit_tree() -> void:
 		ghost.queue_free()
 
 
+var disguise := -1
+
+
+# Prop Hunt: show a prop instead of the funfig.
+func set_disguise(type: int) -> void:
+	if type == disguise:
+		return
+	disguise = type
+	var old := get_node_or_null("Disguise")
+	if old:
+		old.queue_free()
+	fig.visible = type < 0
+	if tag:
+		tag.visible = type < 0
+	if type < 0:
+		return
+	var donor := RigidBody3D.new()
+	Entities.dress(donor, type)
+	var holder := Node3D.new()
+	holder.name = "Disguise"
+	holder.position.y = 0.5
+	add_child(holder)
+	for c in donor.get_children():
+		donor.remove_child(c)
+		if c is CollisionShape3D:
+			c.free()
+		else:
+			holder.add_child(c)
+	donor.free()
+	if is_local:
+		Figure.set_layers(holder, 2)
+		_set_view(true)
+
+
 func set_team(t: String) -> void:
 	team = t
 	if tag:
@@ -218,7 +252,7 @@ func _local_physics(delta: float) -> void:
 	var typing: bool = main.hud != null and main.hud.is_typing()
 	var input := Vector2.ZERO
 	var jumped := false
-	var menus: bool = typing or main.hud.menu_open()
+	var menus: bool = typing or main.hud.menu_open() or not main.modes.can_move(peer_id)
 	if not menus:
 		if Input.is_physical_key_pressed(KEY_W): input.y -= 1
 		if Input.is_physical_key_pressed(KEY_S): input.y += 1
@@ -450,6 +484,8 @@ func _key(ke: InputEventKey) -> void:
 		KEY_C:
 			_emote(ANIM_SIT)
 		_:
+			if main.modes.try_vote(key):
+				return
 			var sizes: Array = Bricks.SHAPES[shape]["sizes"]
 			if tool_on and key >= KEY_1 and key <= KEY_9 and key - KEY_1 < sizes.size():
 				size_idx[shape] = key - KEY_1
@@ -738,6 +774,9 @@ func _use() -> void:
 		main.progress.achieve("first_door")
 		return
 	var looked := _look_entity()
+	if looked and main.modes.mode == main.modes.PROP_HUNT and not main.modes.is_seeker(peer_id):
+		main.modes.request_disguise(looked.type)
+		return
 	if looked and Entities.TYPES[looked.type].get("explosive", false):
 		main.request_fuse(looked.ent_id)
 		return
@@ -816,6 +855,8 @@ func _look_entity() -> RigidBody3D:
 
 
 func _hands_click(button: int) -> void:
+	if button == MOUSE_BUTTON_LEFT and main.modes.try_tag(self):
+		return
 	match button:
 		MOUSE_BUTTON_LEFT:
 			if held:

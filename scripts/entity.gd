@@ -169,7 +169,7 @@ func _vehicle(delta: float) -> void:
 	var stick_y := 0.0   # controller left stick, up = +
 	var rt := 0.0
 	var lt := 0.0
-	if driving and not (main.hud and (main.hud.is_typing() or main.hud.menu_open())):
+	if driving and main.modes.can_drive() and not (main.hud and (main.hud.is_typing() or main.hud.menu_open())):
 		w = float(Input.is_physical_key_pressed(KEY_W)) - float(Input.is_physical_key_pressed(KEY_S))
 		s = float(Input.is_physical_key_pressed(KEY_A)) - float(Input.is_physical_key_pressed(KEY_D))
 		space_key = Input.is_physical_key_pressed(KEY_SPACE) or Input.is_joy_button_pressed(0, JOY_BUTTON_A)

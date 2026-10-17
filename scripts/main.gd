@@ -29,6 +29,7 @@ const HudScript = preload("res://scripts/hud.gd")
 const RelayPeer = preload("res://scripts/relay_peer.gd")
 const AudioScript = preload("res://scripts/audio.gd")
 const ProgressScript = preload("res://scripts/progress.gd")
+const ModesScript = preload("res://scripts/modes.gd")
 
 const EXPLOSION_RADIUS := 4.0
 const BLAST_RADIUS := 9.0
@@ -76,6 +77,7 @@ var using_pad := false
 var test_mode := false   # headless test runs: no captured mouse, so don't auto-pause
 var audio: Node
 var progress: Node
+var modes: Node
 var water_boxes: Array = []   # [AABB, surface y]
 var fuses := {}               # host: explosive entity id -> seconds left
 var wires: Array = []         # [source entity id, "ent"/"brick", target id]
@@ -99,6 +101,10 @@ func _ready() -> void:
 	add_child(audio)
 	progress = ProgressScript.new()
 	add_child(progress)
+	modes = ModesScript.new()
+	modes.name = "Modes"
+	modes.main = self
+	add_child(modes)
 	progress.unlocked.connect(_on_unlocked)
 	menu = MenuScript.new()
 	add_child(menu)
@@ -157,9 +163,10 @@ func server_url() -> String:
 	return ONLINE_URL
 
 
-func host_game(info: Dictionary, map: int, color: Color, build_name := "", limit := 0) -> void:
+func host_game(info: Dictionary, map: int, color: Color, build_name := "", limit := 0, game_mode := 0) -> void:
 	my_info = clean_info(info)
 	map_id = clampi(map, 0, Maps.NAMES.size() - 1)
+	modes.mode = 0 if map_id == Maps.DODGEBALL else clampi(game_mode, 0, ModesScript.NAMES.size() - 1)
 	plane_color = color
 	brick_limit = maxi(limit, 0)
 	loaded_build = ""
@@ -170,7 +177,8 @@ func host_game(info: Dictionary, map: int, color: Color, build_name := "", limit
 	var peer := RelayPeer.new()
 	peer.room_ready.connect(_on_room_ready)
 	peer.relay_error.connect(_on_relay_error)
-	if peer.start(server_url(), {"t": "host", "name": my_info["name"], "map": Maps.NAMES[map_id]}) != OK:
+	var room_label: String = Maps.NAMES[map_id] if not modes.is_on() else "%s · %s" % [ModesScript.NAMES[modes.mode], Maps.NAMES[map_id]]
+	if peer.start(server_url(), {"t": "host", "name": my_info["name"], "map": room_label}) != OK:
 		menu.set_status("Couldn't start connecting to the FunLand server.")
 		return
 	multiplayer.multiplayer_peer = peer
@@ -362,6 +370,8 @@ func _start_world() -> void:
 			_clear_all_bricks()
 			system_msg.rpc("The host cleared all the bricks."))
 	hud.set_dodgeball(is_dodgeball())
+	hud.team_mode = is_dodgeball() or modes.needs_teams()
+	modes._refresh_visuals.call_deferred()
 	for id in bricks:
 		_make_brick_node(id)
 
@@ -444,6 +454,7 @@ func register(info: Dictionary) -> void:
 	var extra := {
 		"teams": teams, "limit": brick_limit, "state": dodge_state, "timer": dodge_timer,
 		"score": score, "alive": alive.keys(), "wires": wires,
+		"mode": modes.mode, "mphase": modes.phase, "mtimer": modes.timer, "mdata": modes.data,
 	}
 	setup_world.rpc_id(id, map_id, plane_color, players, blist, elist, extra)
 	for other in players:
@@ -467,6 +478,10 @@ func setup_world(m: int, c: Color, plist: Dictionary, blist: Array, elist: Array
 	for a in extra.get("alive", []):
 		alive[a] = true
 	wires = extra.get("wires", [])
+	modes.mode = extra.get("mode", 0)
+	modes.phase = extra.get("mphase", "")
+	modes.timer = extra.get("mtimer", 0.0)
+	modes.data = extra.get("mdata", {})
 	for b in blist:
 		if b[6]:
 			doors_open[b[0]] = true
@@ -519,6 +534,8 @@ func _remove_player(id: int) -> void:
 
 # Where a player should (re)appear: their team's side in dodgeball, or the bench if they're out.
 func spawn_point_for(id: int) -> Vector3:
+	if modes.is_on():
+		return modes.spawn_point(id)
 	if not is_dodgeball():
 		return Maps.spawn_point(map_id)
 	var team: String = teams.get(id, "")
@@ -910,7 +927,7 @@ func req_spawn(type: int, pos: Vector3, yaw: float) -> void:
 
 
 func _server_spawn(peer: int, type: int, pos: Vector3, yaw: float) -> void:
-	if type < 0 or type >= Entities.TYPES.size() or is_dodgeball() or pos.length() > 1000.0:
+	if type < 0 or type >= Entities.TYPES.size() or is_dodgeball() or pos.length() > 1000.0 or (modes.mode == ModesScript.PROP_HUNT and modes.phase in ["hide", "seek"]):
 		return
 	if entities.size() >= MAX_ENTITIES:
 		_notify(peer, "Too many things in the world (max %d). Delete some with X." % MAX_ENTITIES)
@@ -1177,9 +1194,11 @@ func req_team(team: String) -> void:
 
 
 func _server_team(peer: int, team: String) -> void:
-	if team != "red" and team != "blue" or not is_dodgeball():
+	if team != "red" and team != "blue" or not (is_dodgeball() or modes.needs_teams()):
 		return
 	team_set.rpc(peer, team)
+	if not is_dodgeball():
+		return
 	if dodge_state == "build" or dodge_state == "waiting":
 		alive[peer] = true
 	else:
@@ -1352,7 +1371,7 @@ func _server_place(peer: int, pos: Vector3, size: Vector3i, color: Color, shape:
 		return
 	if pos.length() > 1000.0 or bricks.size() >= MAX_BRICKS or overlaps_any(pos, size, rot):
 		return
-	if not can_build_here(peer, pos, size, rot):
+	if not can_build_here(peer, pos, size, rot) or not modes.can_place(peer, pos, size, rot):
 		return
 	if _budget_left(peer) == 0:
 		_notify(peer, "You're out of bricks!")
@@ -1730,7 +1749,7 @@ func _handle_test_args() -> void:
 	test_mode = not OS.get_cmdline_user_args().is_empty()
 	for a in OS.get_cmdline_user_args():
 		if a.begins_with("autohost="):
-			host_game({"name": "Host"}, int(a.get_slice("=", 1)), Color(0.3, 0.6, 0.9))
+			host_game({"name": "Host"}, int(a.get_slice("=", 1)), Color(0.3, 0.6, 0.9), "", 0, modes.mode)
 		elif a.begins_with("autoload="):
 			host_game({"name": "Host"}, 0, Color(0.3, 0.6, 0.9), a.get_slice("=", 1))
 		elif a == "autojoin":
@@ -1921,6 +1940,51 @@ func _handle_test_args() -> void:
 			progress.achieve("first_brick")
 			progress.add("bricks", 100)
 			print("TEST unlocked helmet=", progress.is_unlocked("hat", 24), " checkers=", progress.is_unlocked("print", 10), " golden crown=", progress.is_unlocked("hat", 26))
+		elif a.begins_with("automode="):
+			modes.mode = int(a.get_slice("=", 1))
+			modes.time_scale = 0.05
+		elif a == "autoctf":
+			# joiner: run to the red flag, then home to the blue base
+			get_tree().create_timer(4.0).timeout.connect(func():
+				var p := local_player()
+				var base := Maps.spawn_point(map_id)
+				p.position = base + Vector3(-modes.CTF_BASE, 0.5, 0)
+				await get_tree().create_timer(1.0).timeout
+				print("TEST ctf red flag: ", modes.data.get("flags", {}).get("red"))
+				p.position = base + Vector3(modes.CTF_BASE, 0.5, 0)
+				await get_tree().create_timer(1.0).timeout
+				print("TEST ctf score: ", modes.data.get("score")))
+		elif a == "autorace":
+			get_tree().create_timer(3.5).timeout.connect(func():
+				var p := local_player()
+				print("TEST race phase=", modes.phase, " cps=", modes.data.get("cps", []).size(), " karts=", modes.data.get("karts"), " in kart=", p.vehicle != null)
+				for i in modes.data.get("cps", []).size():
+					modes.request_cp(i)
+				await get_tree().create_timer(0.5).timeout
+				print("TEST race done=", modes.data.get("done"), " phase=", modes.phase))
+		elif a == "autobuildbattle":
+			get_tree().create_timer(3.0).timeout.connect(func():
+				var plot: Vector3 = modes.data.get("plots", {}).get(1, Vector3.ZERO)
+				print("TEST build phase=", modes.phase, " theme=", modes.data.get("theme"), " plot=", plot)
+				request_place(plot + Vector3(0.2, 0.24, 0.2), Vector3i(1, 3, 1), Color.RED, 0, 0)
+				request_place(plot + Vector3(30.2, 0.24, 0.2), Vector3i(1, 3, 1), Color.RED, 0, 0)
+				await get_tree().create_timer(0.3).timeout
+				print("TEST build bricks placed (1 expected): ", bricks.size()))
+		elif a == "autoprop":
+			get_tree().create_timer(4.5).timeout.connect(func():
+				print("TEST prop phase=", modes.phase, " seekers=", modes.data.get("seekers"), " props=", entities.size())
+				if not modes.is_seeker(my_id()):
+					modes.request_disguise(0)
+				await get_tree().create_timer(2.5).timeout
+				print("TEST prop phase=", modes.phase, " disguise=", modes.data.get("disguise"))
+				if modes.is_seeker(my_id()):
+					for pid in players:
+						if pid != my_id():
+							local_player().position = player_nodes[pid].position + Vector3(1.5, 0, 0)
+							await get_tree().create_timer(0.5).timeout
+							modes.request_tag(pid)
+				await get_tree().create_timer(1.0).timeout
+				print("TEST prop after tag phase=", modes.phase, " seekers=", modes.data.get("seekers")))
 		elif a == "autoteam":
 			get_tree().create_timer(2.5).timeout.connect(func(): request_team("red" if multiplayer.is_server() else "blue"))
 		elif a.begins_with("autosave="):

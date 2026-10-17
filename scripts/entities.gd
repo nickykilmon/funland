@@ -10,6 +10,7 @@ const DODGEBALL_TYPE := 4
 const BUTTON := 22
 const PLATE := 23
 const LAMP := 24
+const CHECKPOINT := 25
 const BALLOON_COLORS := [Color(1, 0.2, 0.25), Color(0.25, 0.55, 1), Color(1, 0.85, 0.15), Color(0.4, 0.9, 0.35), Color(0.9, 0.4, 1), Color(1, 0.55, 0.15)]
 
 const TYPES := [
@@ -50,6 +51,7 @@ const TYPES := [
 	{"name": "Button", "kind": ITEM, "mass": 5.0, "frozen": true, "rest_y": 0.65},
 	{"name": "Pressure Plate", "kind": ITEM, "mass": 10.0, "frozen": true, "rest_y": 0.05},
 	{"name": "Lamp", "kind": ITEM, "mass": 8.0},
+	{"name": "Checkpoint", "kind": ITEM, "mass": 50.0, "frozen": true, "rest_y": 0.3},
 ]
 
 
@@ -262,6 +264,14 @@ static func dress(body: RigidBody3D, type: int) -> void:
 			light.shadow_enabled = true
 			body.add_child(light)
 			_box_shape(body, Vector3(0.5, 2.3, 0.5), Vector3(0, -0.05, 0))
+	if type == CHECKPOINT:
+		for x in [-4.0, 4.0]:
+			Figure.box(body, Vector3(0.4, 4.0, 0.4), Vector3(x, 1.7, 0), Color(0.95, 0.95, 0.95))
+			_box_shape(body, Vector3(0.4, 4.0, 0.4), Vector3(x, 1.7, 0))
+		Figure.box(body, Vector3(8.4, 0.8, 0.2), Vector3(0, 3.9, 0), Color(0.15, 0.7, 0.3))
+		for i in 8:
+			Figure.box(body, Vector3(0.5, 0.4, 0.22), Vector3(-3.5 + i, 3.9, 0), Color.WHITE if i % 2 == 0 else Color(0.1, 0.1, 0.1))
+		_box_shape(body, Vector3(8.4, 0.8, 0.2), Vector3(0, 3.9, 0))
 	if is_vehicle(type) and t.has("wheels"):
 		_wheels(body, t)
 
